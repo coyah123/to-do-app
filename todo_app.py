@@ -513,8 +513,9 @@ def jira_updates(task, issue, old_issue):
 
     Epic, sprint, description and due date: taken from the ticket only if
     your field is empty, or still holds what the previous copy of the ticket
-    put there - anything you wrote yourself is kept. Completed date: Jira's
-    resolved date, only when your task is Done. Links: every link in the
+    put there - anything you wrote yourself is kept. Resolved in Jira: the
+    task becomes Done with Jira's resolved date as its completed date (only
+    for a resolution not seen before, so reopening it yourself sticks). Links: every link in the
     ticket that isn't on the task yet (ones you removed after an earlier
     attach aren't re-added)."""
     old = old_issue or {}
@@ -528,7 +529,12 @@ def jira_updates(task, issue, old_issue):
         updates["jira_made"] = True  # "Ticket made" - it clearly exists
     resolved = issue.get("resolved", "")
     done_date = task.get("completed_date", "")
-    if (resolved and task.get("status") == DONE and resolved != done_date
+    if resolved and task.get("status") != DONE and resolved != old.get("resolved"):
+        # Resolved in Jira -> Done here. Only for a resolution we haven't seen
+        # yet, so reopening the task yourself sticks across refreshes.
+        updates["status"] = DONE
+        updates["completed_date"] = resolved
+    elif (resolved and task.get("status") == DONE and resolved != done_date
             and (not done_date or done_date == old.get("resolved"))):
         updates["completed_date"] = resolved
     have = {link.get("url") for link in task.get("links") or []}
@@ -2477,6 +2483,9 @@ class App(tk.Tk):
                 self.f_kinds[kind].set(updates[kind])
         if "description" in updates:
             self._set_text(self.f_desc, updates["description"])
+        if "status" in updates:
+            self.f_status.set(updates["status"])
+            self._update_status_pill()
         if "priority" in updates:
             self.f_priority.set(updates["priority"])
             self._update_priority_icon()
@@ -2502,7 +2511,8 @@ class App(tk.Tk):
         self._render_jira()
         labels = {"epic": "epic", "sprint": "sprint", "description": "description",
                   "due_date": "due date", "completed_date": "completed date",
-                  "jira_ref": "Jira ticket number", "priority": "priority"}
+                  "jira_ref": "Jira ticket number", "priority": "priority",
+                  "status": "status Done (resolved in Jira)"}
         filled = [labels[k] for k in updates if k in labels]
         if "links" in updates:
             n = len(updates["links"]) - len(current["links"])
@@ -4370,18 +4380,18 @@ class App(tk.Tk):
             for i, t in enumerate(tasks):
                 key = (t.get("jira") or {}).get("key") or t.get("jira_ref")
                 if key:
-                    by_key.setdefault(key, (project, i))
+                    by_key.setdefault(key, []).append((project, i))
         refreshed, by_project = [], {}
         for issue in issues:
             if issue["key"] in by_key:
-                project, i = by_key[issue["key"]]
-                task = self.store.projects[project][i]
-                task.update(jira_updates(task, issue, task.get("jira")))
-                for kind in ("epic", "sprint"):
-                    names = self.store.groups[kind].setdefault(project, [])
-                    if issue.get(kind) and issue[kind] not in names:
-                        names.append(issue[kind])
-                task["jira"] = issue
+                for project, i in by_key[issue["key"]]:  # every task linked to it
+                    task = self.store.projects[project][i]
+                    task.update(jira_updates(task, issue, task.get("jira")))
+                    for kind in ("epic", "sprint"):
+                        names = self.store.groups[kind].setdefault(project, [])
+                        if issue.get(kind) and issue[kind] not in names:
+                            names.append(issue[kind])
+                    task["jira"] = issue
                 refreshed.append(issue["key"])
             elif create:
                 by_project.setdefault(IMPORTED_PROJECT, []).append(jira_task(issue))

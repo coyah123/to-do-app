@@ -362,7 +362,7 @@ isn't valid Jira XML, it stays in the box and the status bar says why.
 | **Epic / Sprint** | The ticket's epic and sprint (also added to the project's lists, so you can filter by them) |
 | **Description** | The Jira description (HTML converted to readable text) |
 | **Due** | Jira's due date |
-| **Completed** | Jira's resolved date — only if your task's status is **Done** |
+| **Status → Done** | If the ticket is **resolved** in Jira, the task becomes **Done** and its Completed date is Jira's resolved date. If you reopen the task yourself, refreshing leaves it open — unless Jira shows a *new* resolution |
 | **Created** | Jira's created date — only for tasks *created* from a Jira import |
 | **Links** | Every link in the XML: the ticket itself, the epic, parent, linked issues (e.g. "is blocked by MDA-9"), subtasks, attachments, and any links inside the description or comments |
 
@@ -376,7 +376,8 @@ isn't valid Jira XML, it stays in the box and the status bar says why.
 - Links are **added**, never replaced. Links already on the task are
   skipped, and a link you **removed** after an earlier attach isn't added
   back when you refresh.
-- Status, title, blockers, notes and custom fields are **never touched**.
+- Title, blockers, notes and custom fields are **never touched**; status
+  only changes to Done when Jira resolves the ticket (see the table).
 
 The status bar says what was filled in, e.g. *"Attached Jira MDA-12 —
 filled in description, due date, 8 links."*
