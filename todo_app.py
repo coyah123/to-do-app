@@ -19,7 +19,9 @@ Runs on Windows, macOS, and Linux.
 import csv
 import json
 import os
+import re
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
@@ -67,6 +69,7 @@ TASK_FIELDS = [
     ("jira_ref", "Jira Link / Number"),
     ("blockers", "Blockers"),
     ("notes", "Notes"),
+    ("links", "Links"),  # list of {"title", "description", "url"}
 ]
 
 # Center table columns: (key, heading, width, stretch). The title lives in
@@ -124,7 +127,7 @@ def new_task(title):
     """A task with every field present and defaults filled in."""
     task = {key: "" for key, _ in TASK_FIELDS}
     task.update(title=title, status=DEFAULT_STATUS, added_date=now_stamp(),
-                jira_made=False)
+                jira_made=False, links=[])
     return task
 
 
@@ -138,6 +141,16 @@ def make_dot(master, color, size=16, radius=5.2):
             if px:
                 img.put(px, (x, y))
     return img
+
+
+def normalize_url(url):
+    """Add https:// to bare addresses like 'example.com/page'."""
+    if (re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url)      # https://, ftp://
+            or re.match(r"^(mailto|tel|file):", url, re.I)
+            or re.match(r"^[a-zA-Z]:[\\/]", url)               # C:\path
+            or url.startswith("\\\\")):                         # \\server\share
+        return url
+    return "https://" + url
 
 
 def set_status(task, status):
@@ -205,6 +218,7 @@ class Store:
                     task["status"] = DONE if task.get("completed_date") else DEFAULT_STATUS
                 task.setdefault("epic", "")
                 task.setdefault("sprint", "")
+                task.setdefault("links", [])
             for task in tasks:
                 if not isinstance(task.get("rank"), (int, float)):
                     task["rank"] = self._next_rank()
@@ -666,6 +680,8 @@ class App(tk.Tk):
             meta.append("\u21bb " + task["sprint"])
         if task.get("jira_ref"):
             meta.append(task["jira_ref"])
+        if task.get("links"):
+            meta.append(f"\U0001F517 {len(task['links'])}")
         if meta:
             tk.Label(body, text="   ".join(meta), bg=CARD_BG, fg="#667",
                      font=("", 8), wraplength=LIST_WIDTH - 40, justify="left",
@@ -1341,6 +1357,10 @@ class App(tk.Tk):
         self.f_notes = self._text_row(form, r, "Notes", 4, weight=2)
         r += 1
 
+        ttk.Label(form, text="Links").grid(row=r, column=0, sticky="ne", **pad)
+        self._build_links(form, r)
+        r += 1
+
         dates = ttk.Frame(form)
         dates.grid(row=r, column=1, columnspan=3, sticky="w", padx=4)
         self.f_added_lbl = ttk.Label(dates, text="Created: -", foreground="#666",
@@ -1364,6 +1384,117 @@ class App(tk.Tk):
         self._update_status_pill()
         self._toggle_jira()
         self._set_form_enabled(False)
+
+    def _build_links(self, form, r):
+        style = ttk.Style(self)
+        style.configure("Link.TLabel", foreground="#1a5fb4", font=("", 9, "underline"))
+        style.configure("LinkAction.TLabel", foreground="#888", font=("", 8))
+
+        box = ttk.Frame(form)
+        box.grid(row=r, column=1, columnspan=3, sticky="ew", padx=4, pady=3)
+        box.columnconfigure(1, weight=1)
+        self.f_links_list = ttk.Frame(box)
+        self.f_links_list.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+
+        self.f_link_title = ttk.Entry(box)
+        self.f_link_desc = ttk.Entry(box)
+        self.f_link_url = ttk.Entry(box)
+        for i, (label, entry) in enumerate((("Link title", self.f_link_title),
+                                           ("Link description", self.f_link_desc),
+                                           ("Link", self.f_link_url)), start=1):
+            ttk.Label(box, text=label, foreground="#555", font=("", 8)).grid(
+                row=i, column=0, sticky="w", padx=(0, 6))
+            entry.grid(row=i, column=1, columnspan=2 if i < 3 else 1, sticky="ew", pady=1)
+            entry.bind("<Return>", lambda e: self._add_link())
+        self.f_link_btn = ttk.Button(box, text="Add link", width=9, command=self._add_link)
+        self.f_link_btn.grid(row=3, column=2, padx=(4, 0))
+
+        self._links = []
+        self._link_edit_index = None
+
+    def _render_links(self):
+        for w in self.f_links_list.winfo_children():
+            w.destroy()
+        if not self._links:
+            ttk.Label(self.f_links_list, text="No links yet.", foreground="#888",
+                      font=("", 8)).pack(anchor="w")
+        for n, link in enumerate(self._links):
+            row = ttk.Frame(self.f_links_list)
+            row.pack(fill="x")
+            a = ttk.Label(row, text=link.get("title") or link["url"],
+                          style="Link.TLabel", cursor="hand2")
+            a.pack(side="left")
+            a.bind("<Button-1>", lambda e, u=link["url"]: self._open_link(u))
+            a.bind("<Enter>", lambda e, u=link["url"]: self._status(u))
+            for text, cmd in (("\u2715", self._remove_link), ("edit", self._edit_link)):
+                act = ttk.Label(row, text=text, style="LinkAction.TLabel", cursor="hand2")
+                act.pack(side="right", padx=(6, 0))
+                act.bind("<Button-1>", lambda e, n=n, f=cmd: f(n))
+            if link.get("description"):
+                ttk.Label(self.f_links_list, text=link["description"], foreground="#666",
+                          font=("", 8), wraplength=280, justify="left").pack(
+                    anchor="w", padx=(10, 0), pady=(0, 2))
+
+    def _open_link(self, url):
+        try:
+            webbrowser.open(url)
+            self._status(f"Opened {url}")
+        except Exception as exc:  # noqa: BLE001 - surface any launcher failure
+            self._status(f"Couldn't open {url}: {exc}")
+
+    def _reset_link_entries(self):
+        for entry in (self.f_link_title, self.f_link_desc, self.f_link_url):
+            entry.delete(0, "end")
+        self._link_edit_index = None
+        self.f_link_btn.configure(text="Add link")
+
+    def _add_link(self):
+        url = self.f_link_url.get().strip()
+        if not url:
+            self._status("Enter the link (URL) first.")
+            self.f_link_url.focus_set()
+            return
+        url = normalize_url(url)
+        link = {
+            "title": self.f_link_title.get().strip() or url,
+            "description": self.f_link_desc.get().strip(),
+            "url": url,
+        }
+        if self._link_edit_index is not None:
+            self._links[self._link_edit_index] = link
+        else:
+            self._links.append(link)
+        self._reset_link_entries()
+        self._render_links()
+        self._persist_links(f"Link '{link['title']}' saved.")
+
+    def _edit_link(self, n):
+        link = self._links[n]
+        self._reset_link_entries()
+        self.f_link_title.insert(0, link.get("title", ""))
+        self.f_link_desc.insert(0, link.get("description", ""))
+        self.f_link_url.insert(0, link["url"])
+        self._link_edit_index = n
+        self.f_link_btn.configure(text="Update")
+        self.f_link_title.focus_set()
+
+    def _remove_link(self, n):
+        link = self._links.pop(n)
+        self._reset_link_entries()
+        self._render_links()
+        self._persist_links(f"Removed link '{link.get('title', '')}'.")
+
+    def _persist_links(self, msg):
+        """Links save immediately on an existing task; new tasks keep them until Save."""
+        if self.active_project is not None and self.editing_index is not None:
+            task = self.store.projects[self.active_project][self.editing_index]
+            task["links"] = [dict(link) for link in self._links]
+            self.store.save()
+            if self.view == "Visual Planner":
+                self._refresh_planner()
+            self._status(msg)
+        else:
+            self._status("Link added - save the task to keep it.")
 
     def _text_row(self, form, r, label, height, weight):
         ttk.Label(form, text=label).grid(row=r, column=0, sticky="ne", padx=4, pady=3)
@@ -1398,6 +1529,8 @@ class App(tk.Tk):
         for w in (self.status_cb, self.f_epic, self.f_sprint):
             w.configure(state="readonly" if enabled else "disabled")
         self.jira_chk.state(["!disabled"] if enabled else ["disabled"])
+        for w in (self.f_link_title, self.f_link_desc, self.f_link_url, self.f_link_btn):
+            w.state(["!disabled"] if enabled else ["disabled"])
         if enabled:
             self._toggle_jira()
         else:
@@ -1443,6 +1576,9 @@ class App(tk.Tk):
         self.f_added_lbl.configure(text=f"Created: {self._added_date or '-'}")
         self.f_completed_lbl.configure(text=f"Completed: {self._completed_date or '-'}")
         self._update_status_pill()
+        self._links = [dict(link) for link in task.get("links", [])]
+        self._reset_link_entries()
+        self._render_links()
 
     # -- views ------------------------------------------------------------
     def _refresh_views(self):
@@ -1792,6 +1928,7 @@ class App(tk.Tk):
             else "",
             "blockers": self.f_blockers.get("1.0", "end").strip(),
             "notes": self.f_notes.get("1.0", "end").strip(),
+            "links": [dict(link) for link in self._links],
         }
 
         if self.editing_index is None:
@@ -1830,6 +1967,9 @@ class App(tk.Tk):
                 row = [project]
                 for key, _ in TASK_FIELDS:
                     v = task.get(key, "")
+                    if key == "links":
+                        v = "\n".join(f"{link.get('title', '')}: {link['url']}"
+                                      for link in v or [])
                     if key == "jira_made":
                         v = "Yes" if v else "No"
                     row.append(v)
