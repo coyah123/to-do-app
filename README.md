@@ -153,10 +153,24 @@ Three resizable panes:
 
 ## Working with tasks
 
-Click a task (in any view) to open it in **Task Details**. **Save**
-(Ctrl+S) writes your changes; **New** (Ctrl+N) starts a fresh task in the
-selected project (and subgroup, if one is selected). The form has three
-tabs.
+Click a task (in any view) to open it in **Task Details**. **New** (Ctrl+N)
+starts a fresh task in the selected project (and subgroup, if one is
+selected). The form has three tabs.
+
+**Everything saves automatically — no Save button needed.**
+
+- Typing in any field (title, description, blockers, notes, due date, Jira
+  number, custom fields) is saved about half a second after you pause.
+- Dropdowns and checkboxes (status, priority, subgroup, epic, sprint, Jira
+  "ticket made") save immediately. Links, custom fields added/removed and
+  attached Jira tickets save as soon as you add them.
+- Every view updates right away — the tree, table, Visual Planner cards and
+  Buddy — and a small **✓ Saved** with the time appears next to the buttons.
+- A **new task** is created as soon as you give it a title (until then the
+  form shows "Add a title to save").
+- Nothing is lost if you click another task, switch views or close the app
+  straight after typing — the pending change is saved first.
+- **Save** (Ctrl+S) is still there if you want to force a save.
 
 ### Details tab
 
@@ -169,7 +183,7 @@ tabs.
 | **Due** | Free text; use `YYYY-MM-DD` so sorting and overdue marks work. |
 | **Jira** | "Ticket made" checkbox + a box for the ticket number/link. Filled in automatically from an attached ticket; the ticket and its Jira links also appear as clickable **quick links** at the bottom of the form. |
 | **Description, Blockers, Notes** | Free text; these boxes grow with the window. |
-| **Links** | Any number of links, each with a **title**, **description** and **URL**. The title is a hyperlink — click it to open in your browser (hover shows the URL in the status bar). Bare addresses like `example.com/page` get `https://` added. **edit** loads a link back for changes; **✕** removes it. On a saved task, link changes are stored immediately. |
+| **Links** | Any number of links, each with a **title**, **description** and **URL**. The title is a hyperlink — click it to open in your browser (hover shows the URL in the status bar). Bare addresses like `example.com/page` get `https://` added. **edit** loads a link back for changes; **✕** removes it. Link changes save immediately. |
 | **Created / Completed** | Stamped automatically from the system clock. |
 | **From** | Shown when the task came from a coworker (or Jira). |
 
@@ -182,7 +196,7 @@ Customer, Story Points.
   and click **Add field**. A new name is created once and is then available
   on every task.
 - Edit values inline; long fields get a multi-line box. **✕** removes a
-  field from this task. **Save** to keep changes.
+  field from this task. Changes save automatically.
 - The tab label shows how many fields the task has, e.g. **Fields (3)**.
 - Shared tasks from a coworker create any fields you don't have yet.
 - Every custom field gets its own column in CSV/XLSX exports.
@@ -395,7 +409,7 @@ right-click is a two-finger click or **Ctrl+click**.
 | Shortcut | Action |
 |---|---|
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Buddy / Manager / Visual Planner |
-| Ctrl+S | Save the task in the form (Manager, Planner) |
+| Ctrl+S | Save now (tasks also save automatically) |
 | Ctrl+N | New task (Manager, Planner) · focus quick-add (Buddy) |
 | Ctrl+Enter | Attach the pasted Jira XML (Jira tab) |
 | Esc | In the add box: switch back to "New project" |

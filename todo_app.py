@@ -185,6 +185,7 @@ BUDDY_SIZE = (300, 440)
 BUDDY_ORDER = ["In Progress", "Blocked", "Waiting for approval", "Not started", "Done"]
 BUDDY_BG = "#fff8c5"  # sticky-note yellow
 ALL_PROJECTS = "All projects"
+AUTOSAVE_DELAY = 500  # ms after the last keystroke before saving
 ALL_SPRINTS = "All sprints"
 NO_SPRINT = "(no sprint)"
 
@@ -907,6 +908,7 @@ class App(tk.Tk):
         self._apply_pin()
 
     def _on_close(self):
+        self._flush_autosave()
         self._remember_geometry()
         save_settings(self.settings)
         self.destroy()
@@ -1969,7 +1971,7 @@ class App(tk.Tk):
         self.f_jira_made = tk.BooleanVar(value=False)
         self.jira_chk = ttk.Checkbutton(
             form, text="Ticket made", variable=self.f_jira_made,
-            command=self._toggle_jira,
+            command=lambda: (self._toggle_jira(), self._form_changed(delay=1)),
         )
         self.jira_chk.grid(row=r, column=1, sticky="w", **pad)
         self.f_jira_ref = ttk.Entry(form, width=14)
@@ -2007,6 +2009,18 @@ class App(tk.Tk):
         ttk.Button(btnrow, text=f"New  ({MOD_LABEL}+N)", command=self._new_task).pack(
             side="left", padx=4
         )
+        self.f_saved_lbl = ttk.Label(btnrow, text="", foreground="#2d8738", font=("", 8))
+        self.f_saved_lbl.pack(side="left", padx=(8, 0))
+
+        # Autosave: every edit is saved shortly after you make it.
+        self._autosave_job = None
+        self._autosave_target = None
+        self._loading_form = False
+        for w in (self.f_title, self.f_due, self.f_jira_ref,
+                  self.f_desc, self.f_blockers, self.f_notes):
+            self._watch_typing(w)
+        for combo in (self.status_cb, self.f_priority, self.f_group, self.f_epic, self.f_sprint):
+            combo.bind("<<ComboboxSelected>>", lambda e: self._form_changed(delay=1), add="+")
 
         self._build_fields_tab(fields_tab)
         self._build_jira_tab(jira_tab)
@@ -2290,7 +2304,8 @@ class App(tk.Tk):
             self.store.save()
             self._status(msg)
         else:
-            self._status(msg + " Save the task to keep it.")
+            self._form_changed(delay=1)  # saved with the task once it has a title
+            self._status(msg)
 
     # -- custom fields tab --------------------------------------------------
     def _build_fields_tab(self, tab):
@@ -2364,6 +2379,7 @@ class App(tk.Tk):
             x.grid(row=r, column=2, sticky="n", padx=(4, 0), pady=2)
             x.bind("<Button-1>", lambda e, n=name: self._remove_field(n))
             self._field_widgets[name] = w
+            self._watch_typing(w)
         for w in [box, self.f_fields_canvas, *box.winfo_children()]:
             if not isinstance(w, tk.Text):
                 bind_wheel(w, lambda n: self.f_fields_canvas.yview_scroll(n, "units"))
@@ -2381,6 +2397,7 @@ class App(tk.Tk):
         values = self._current_fields()
         values.setdefault(name, "")
         self._render_fields(values)
+        self._form_changed(delay=1)
         self.f_field_pick.set("")
         self._field_widgets[name].focus_set()
 
@@ -2388,7 +2405,8 @@ class App(tk.Tk):
         values = self._current_fields()
         values.pop(name, None)
         self._render_fields(values)
-        self._status(f"Removed '{name}' from this task - Save to keep the change.")
+        self._form_changed(delay=1)
+        self._status(f"Removed '{name}' from this task.")
 
     def _build_links(self, form, r):
         style = ttk.Style(self)
@@ -2499,7 +2517,9 @@ class App(tk.Tk):
                 self._refresh_planner()
             self._status(msg)
         else:
-            self._status("Link added - save the task to keep it.")
+            self._form_changed(delay=1)  # creates the task once it has a title
+            self._status(msg if self.f_title.get().strip()
+                         else "Link added - give the task a title to save it.")
 
     def _text_row(self, form, r, label, height, weight):
         ttk.Label(form, text=label).grid(row=r, column=0, sticky="ne", padx=4, pady=3)
@@ -2569,6 +2589,8 @@ class App(tk.Tk):
         self.f_added_lbl.configure(text="Created: (on save)")
 
     def _load_task_into_form(self, task):
+        self._flush_autosave()  # don't lose an edit made just before switching
+        self._loading_form = True
         self._set_form_enabled(True)
         self._refresh_choices()
         self._set_entry(self.f_title, task.get("title", ""))
@@ -2599,6 +2621,116 @@ class App(tk.Tk):
         self._links = [dict(link) for link in task.get("links", [])]
         self._reset_link_entries()
         self._render_links()
+        self._loading_form = False
+        self.f_saved_lbl.configure(text="")
+
+    # -- autosave -----------------------------------------------------------
+    def _watch_typing(self, widget):
+        for seq in ("<KeyRelease>", "<<Paste>>", "<<Cut>>"):
+            widget.bind(seq, lambda e: self._form_changed(), add="+")
+
+    def _form_changed(self, event=None, delay=AUTOSAVE_DELAY):
+        """Something in the form changed: save it shortly (debounced)."""
+        if self._loading_form or self.save_btn.instate(["disabled"]) or not self.active_project:
+            return
+        if self._autosave_target is None:
+            # Remember *which* task this edit belongs to (by id, so it survives
+            # index shifts), or that it's a new task in this project.
+            if self.editing_index is not None:
+                task = self.store.projects[self.active_project][self.editing_index]
+                self._autosave_target = ("task", task.get("id"))
+            else:
+                self._autosave_target = ("new", self.active_project)
+        if self._autosave_job:
+            self.after_cancel(self._autosave_job)
+        self._autosave_job = self.after(delay, self._autosave)
+
+    def _flush_autosave(self):
+        if self._autosave_job:
+            self.after_cancel(self._autosave_job)
+            self._autosave()
+
+    def _find_task(self, task_id):
+        for project, tasks in self.store.projects.items():
+            for i, t in enumerate(tasks):
+                if t.get("id") == task_id:
+                    return project, i
+        return None
+
+    def _task_from_form(self):
+        """The form's contents as a task dict (None if there's no title)."""
+        title = self.f_title.get().strip()
+        if not title:
+            return None
+        status = self.f_status.get()
+        task = {
+            "title": title,
+            "status": status,
+            "priority": self.f_priority.get(),
+            "group": self.f_group.get().strip(),
+            "epic": self.f_epic.get().strip(),
+            "sprint": self.f_sprint.get().strip(),
+            "description": self.f_desc.get("1.0", "end").strip(),
+            "added_date": self._added_date or now_stamp(),
+            "due_date": self.f_due.get().strip(),
+            "completed_date": (self._completed_date or now_stamp()) if status == DONE else "",
+            "jira_made": self.f_jira_made.get(),
+            "jira_ref": self.f_jira_ref.get().strip() if self.f_jira_made.get() else "",
+            "blockers": self.f_blockers.get("1.0", "end").strip(),
+            "notes": self.f_notes.get("1.0", "end").strip(),
+            "links": [dict(link) for link in self._links],
+            "fields": self._collect_fields(),
+        }
+        if self._jira:
+            task["jira"] = self._jira
+        return task
+
+    def _autosave(self):
+        self._autosave_job = None
+        target, self._autosave_target = self._autosave_target, None
+        if not target:
+            return
+        kind, ref = target
+        if kind == "task":
+            found = self._find_task(ref)
+            if not found:
+                return  # deleted meanwhile
+            project, index = found
+        else:
+            project, index = ref, None
+            if project not in self.store.projects:
+                return
+        task = self._task_from_form()
+        if task is None:
+            if self.f_title.winfo_ismapped():
+                self.f_saved_lbl.configure(text="Add a title to save", foreground="#b9770e")
+            return
+
+        same_form = (self.active_project, self.editing_index) == (project, index)
+        if index is None:
+            self.store.add_task(project, task)
+            index = len(self.store.projects[project]) - 1
+            if self.active_project == project and self.editing_index is None:
+                self.editing_index = index  # the form now edits the new task
+                same_form = True
+            self._status(f"Added task '{task['title']}' to '{project}'.")
+        else:
+            stored = self.store.projects[project][index]
+            merged = {**stored, **task}  # keep fields the form doesn't show
+            if merged == stored:
+                return
+            self.store.update_task(project, index, merged)
+            task = merged
+
+        if same_form:
+            # Reflect stamps without reloading the form (keeps your cursor).
+            self._added_date = task["added_date"]
+            self._completed_date = task["completed_date"]
+            self.f_added_lbl.configure(text=f"Created: {self._added_date}")
+            self.f_completed_lbl.configure(text=f"Completed: {self._completed_date or '-'}")
+            self.f_saved_lbl.configure(text=f"\u2713 Saved {datetime.now():%H:%M:%S}",
+                                       foreground="#2d8738")
+        self._refresh_views()
 
     # -- views ------------------------------------------------------------
     def _refresh_views(self):
@@ -3104,6 +3236,10 @@ class App(tk.Tk):
         self._status(f"Entering new task under '{where}'. Fill in + Save.")
 
     def _save_task(self):
+        if self._autosave_job:
+            self.after_cancel(self._autosave_job)
+            self._autosave_job = None
+        self._autosave_target = None
         if (self.j_paste.get("1.0", "end").strip() and self.active_project
                 and not self.save_btn.instate(["disabled"])):
             if not self._jira_attach():
@@ -3118,31 +3254,7 @@ class App(tk.Tk):
             self.f_title.focus_set()
             return
 
-        status = self.f_status.get()
-        completed_date = (self._completed_date or now_stamp()) if status == DONE else ""
-
-        task = {
-            "title": title,
-            "status": status,
-            "priority": self.f_priority.get(),
-            "group": self.f_group.get().strip(),
-            "epic": self.f_epic.get().strip(),
-            "sprint": self.f_sprint.get().strip(),
-            "description": self.f_desc.get("1.0", "end").strip(),
-            "added_date": self._added_date or now_stamp(),
-            "due_date": self.f_due.get().strip(),
-            "completed_date": completed_date,
-            "jira_made": self.f_jira_made.get(),
-            "jira_ref": self.f_jira_ref.get().strip()
-            if self.f_jira_made.get()
-            else "",
-            "blockers": self.f_blockers.get("1.0", "end").strip(),
-            "notes": self.f_notes.get("1.0", "end").strip(),
-            "links": [dict(link) for link in self._links],
-            "fields": self._collect_fields(),
-        }
-        if self._jira:
-            task["jira"] = self._jira
+        task = self._task_from_form()
 
         if self.editing_index is None:
             self.store.add_task(project, task)
