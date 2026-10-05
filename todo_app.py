@@ -21,6 +21,7 @@ import html
 import json
 import os
 import re
+import sys
 import tkinter as tk
 import uuid
 import webbrowser
@@ -28,7 +29,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 # ---------------------------------------------------------------------------
 # Optional dependency: openpyxl (for .xlsx export). Degrade gracefully.
@@ -152,6 +153,47 @@ CARD_BG = "#ffffff"
 CARD_BORDER = "#c4ccd6"
 ACCENT = "#2b7de9"  # selected card, drop target
 LIST_WIDTH = 250
+
+
+# ---------------------------------------------------------------------------
+# Cross-platform input: macOS uses Cmd for shortcuts, Button-2 for right
+# click and small wheel deltas; Linux (X11) sends wheel as Button-4/5.
+# ---------------------------------------------------------------------------
+IS_MAC = sys.platform == "darwin"
+MOD = "Command" if IS_MAC else "Control"   # shortcut modifier
+MOD_LABEL = "Cmd" if IS_MAC else "Ctrl"
+
+
+def wheel_steps(event):
+    """Scroll steps (+down / -up) from a wheel event on any platform."""
+    if getattr(event, "num", None) == 4:
+        return -1
+    if getattr(event, "num", None) == 5:
+        return 1
+    delta = getattr(event, "delta", 0) or 0
+    if IS_MAC:  # small values, one per notch/trackpad tick
+        return -delta
+    return int(-delta / 120) or (-1 if delta > 0 else 1)
+
+
+def bind_wheel(widget, scroll, shift_scroll=None):
+    """Bind vertical (and optional Shift = horizontal) wheel scrolling."""
+    widget.bind("<MouseWheel>", lambda e: scroll(wheel_steps(e)))
+    widget.bind("<Button-4>", lambda e: scroll(wheel_steps(e)))
+    widget.bind("<Button-5>", lambda e: scroll(wheel_steps(e)))
+    if shift_scroll:
+        widget.bind("<Shift-MouseWheel>", lambda e: shift_scroll(wheel_steps(e)))
+        widget.bind("<Shift-Button-4>", lambda e: shift_scroll(wheel_steps(e)))
+        widget.bind("<Shift-Button-5>", lambda e: shift_scroll(wheel_steps(e)))
+
+
+def bind_right_click(widget, callback):
+    """Right-click: Button-3 on Windows/Linux; Button-2 or Ctrl-click on macOS."""
+    if IS_MAC:
+        widget.bind("<Button-2>", callback)
+        widget.bind("<Control-Button-1>", callback)
+    else:
+        widget.bind("<Button-3>", callback)
 
 
 def now_stamp():
@@ -605,10 +647,10 @@ class App(tk.Tk):
         self._build_planner()
         self._refresh_views()
 
-        self.bind_all("<Control-s>", lambda e: self._on_ctrl_s())
-        self.bind_all("<Control-n>", lambda e: self._on_ctrl_n())
+        self.bind_all(f"<{MOD}-s>", lambda e: self._on_ctrl_s())
+        self.bind_all(f"<{MOD}-n>", lambda e: self._on_ctrl_n())
         for i, name in enumerate(VIEWS, start=1):
-            self.bind_all(f"<Control-Key-{i}>", lambda e, n=name: self._show_view(n))
+            self.bind_all(f"<{MOD}-Key-{i}>", lambda e, n=name: self._show_view(n))
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._show_view(self.default_view_var.get())
@@ -621,7 +663,7 @@ class App(tk.Tk):
         for i, name in enumerate(VIEWS, start=1):
             view_menu.add_radiobutton(
                 label=name, variable=self.view_var, value=name,
-                accelerator=f"Ctrl+{i}", command=lambda n=name: self._show_view(n),
+                accelerator=f"{MOD_LABEL}+{i}", command=lambda n=name: self._show_view(n),
             )
 
         # Which view the app opens in.
@@ -650,7 +692,7 @@ class App(tk.Tk):
         menubar.add_cascade(label="File", menu=file_menu)
         menubar.add_cascade(label="View", menu=view_menu)
         settings_menu = tk.Menu(menubar, tearoff=False)
-        settings_menu.add_command(label="Your name\u2026", command=self._ask_name)
+        settings_menu.add_command(label="Your name\u2026", command=lambda: self._ask_name())
         menubar.add_cascade(label="Settings", menu=settings_menu)
         self.config(menu=menubar)
 
@@ -784,10 +826,8 @@ class App(tk.Tk):
         self._drag = None
 
     def _bind_wheel(self, widget):
-        widget.bind("<MouseWheel>", lambda e: self.board.yview_scroll(
-            int(-e.delta / 120), "units"))
-        widget.bind("<Shift-MouseWheel>", lambda e: self.board.xview_scroll(
-            int(-e.delta / 120), "units"))
+        bind_wheel(widget, lambda n: self.board.yview_scroll(n, "units"),
+                   lambda n: self.board.xview_scroll(n, "units"))
         for child in widget.winfo_children():
             self._bind_wheel(child)
 
@@ -1218,7 +1258,7 @@ class App(tk.Tk):
         # project/group row id -> (project, group); group is "" for a project row
         self.b_folder_rows = {}
         self.b_tree.tag_configure("group", font=("", 9, "bold"), foreground="#554")
-        self.b_tree.bind("<Button-3>", self._buddy_menu)
+        bind_right_click(self.b_tree, self._buddy_menu)
         self.b_meta = {}  # row id -> (project, index)
 
         self.b_status_menu = tk.Menu(self, tearoff=False)
@@ -1704,9 +1744,9 @@ class App(tk.Tk):
 
         btnrow = ttk.Frame(form)
         btnrow.grid(row=r, column=0, columnspan=4, pady=(6, 2))
-        self.save_btn = ttk.Button(btnrow, text="Save  (Ctrl+S)", command=self._save_task)
+        self.save_btn = ttk.Button(btnrow, text=f"Save  ({MOD_LABEL}+S)", command=self._save_task)
         self.save_btn.pack(side="left", padx=4)
-        ttk.Button(btnrow, text="New  (Ctrl+N)", command=self._new_task).pack(
+        ttk.Button(btnrow, text=f"New  ({MOD_LABEL}+N)", command=self._new_task).pack(
             side="left", padx=4
         )
 
@@ -1753,12 +1793,12 @@ class App(tk.Tk):
             self.j_view.tag_bind(tag, "<Enter>", lambda e: self.j_view.configure(cursor="hand2"))
             self.j_view.tag_bind(tag, "<Leave>", lambda e: self.j_view.configure(cursor=""))
 
-        paste = ttk.LabelFrame(tab, text="Paste Jira XML (Ctrl+Enter to attach)", padding=4)
+        paste = ttk.LabelFrame(tab, text=f"Paste Jira XML ({MOD_LABEL}+Enter to attach)", padding=4)
         paste.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         paste.columnconfigure(0, weight=1)
-        self.j_paste = tk.Text(paste, height=3, width=40, wrap="none", font=("Consolas", 8))
+        self.j_paste = tk.Text(paste, height=3, width=40, wrap="none", font="TkFixedFont")
         self.j_paste.grid(row=0, column=0, columnspan=4, sticky="ew")
-        self.j_paste.bind("<Control-Return>", lambda e: (self._jira_attach(), "break")[1])
+        self.j_paste.bind(f"<{MOD}-Return>", lambda e: (self._jira_attach(), "break")[1])
         self.j_attach_btn = ttk.Button(paste, text="Attach", command=self._jira_attach)
         self.j_attach_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.j_file_btn = ttk.Button(paste, text="Load .xml file\u2026", command=self._jira_attach_file)
@@ -1930,7 +1970,7 @@ class App(tk.Tk):
         self.f_field_pick.bind("<Return>", lambda e: self._add_field())
         self.f_field_add_btn = ttk.Button(add, text="Add field", command=self._add_field)
         self.f_field_add_btn.pack(side="left", padx=(4, 0))
-        self.fields_save_btn = ttk.Button(tab, text="Save  (Ctrl+S)", command=self._save_task)
+        self.fields_save_btn = ttk.Button(tab, text=f"Save  ({MOD_LABEL}+S)", command=self._save_task)
         self.fields_save_btn.grid(row=3, column=0, columnspan=2, pady=(8, 2))
         self._field_widgets = {}
 
@@ -1973,8 +2013,7 @@ class App(tk.Tk):
             self._field_widgets[name] = w
         for w in [box, self.f_fields_canvas, *box.winfo_children()]:
             if not isinstance(w, tk.Text):
-                w.bind("<MouseWheel>", lambda e: self.f_fields_canvas.yview_scroll(
-                    int(-e.delta / 120), "units"))
+                bind_wheel(w, lambda n: self.f_fields_canvas.yview_scroll(n, "units"))
         self.f_field_pick.configure(values=[n for n in defined if n not in values])
         self.form_tabs.tab(1, text=f"Fields ({len(names)})" if names else "Fields")
         self.f_fields_canvas.yview_moveto(0)
@@ -2749,17 +2788,60 @@ class App(tk.Tk):
             self._status(f"Deleted task '{title}'.")
 
     # -- sharing with coworkers -------------------------------------------
-    def _ask_name(self):
-        name = simpledialog.askstring(
-            "Your name", "Your name (coworkers see it on tasks you share):",
-            initialvalue=self.settings.get("user_name", ""), parent=self,
-        )
-        name = (name or "").strip()
-        if name:
+    def _prompt(self, title, message, initial, on_ok):
+        """Ask for a line of text in a panel drawn inside the main window.
+
+        (tkinter's simpledialog opens a separate window that breaks on some
+        macOS Tk builds, so all typing stays in the app.)"""
+        self._close_prompt()
+        panel = self._prompt_panel = tk.Frame(
+            self, bg="#ffffff", highlightthickness=2, highlightbackground=ACCENT,
+            padx=14, pady=12)
+        tk.Label(panel, text=title, bg="#ffffff", fg="#222",
+                 font=("", 11, "bold")).pack(anchor="w")
+        tk.Label(panel, text=message, bg="#ffffff", fg="#555", wraplength=240,
+                 justify="left").pack(anchor="w", pady=(2, 8))
+        entry = ttk.Entry(panel, width=30)
+        entry.insert(0, initial)
+        entry.pack(fill="x")
+        btns = tk.Frame(panel, bg="#ffffff")
+        btns.pack(fill="x", pady=(10, 0))
+
+        def ok(event=None):
+            value = entry.get().strip()
+            self._close_prompt()
+            on_ok(value)
+            return "break"
+
+        ttk.Button(btns, text="OK", command=ok).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self._close_prompt).pack(side="right", padx=(0, 6))
+        entry.bind("<Return>", ok)
+        entry.bind("<Escape>", lambda e: (self._close_prompt(), "break")[1])
+        panel.place(relx=0.5, rely=0.12, anchor="n")
+        panel.lift()
+        entry.focus_set()
+        entry.select_range(0, "end")
+
+    def _close_prompt(self):
+        panel = getattr(self, "_prompt_panel", None)
+        if panel is not None:
+            panel.destroy()
+            self._prompt_panel = None
+
+    def _ask_name(self, then=None):
+        """Settings > Your name. `then` runs after a name is saved."""
+        def save(name):
+            if not name:
+                self._status("Name not changed.")
+                return
             self.settings["user_name"] = name
             save_settings(self.settings)
             self._status(f"Your name is set to '{name}'.")
-        return name
+            if then:
+                then()
+
+        self._prompt("Your name", "Coworkers see this on tasks you share with them.",
+                     self.settings.get("user_name", ""), save)
 
     def _share_scope(self):
         """(project, [task indexes], label) for what's selected, or None."""
@@ -2796,9 +2878,10 @@ class App(tk.Tk):
             self._status("Select a task, subgroup or project to share.")
             return
         project, indexes, label = scope
-        name = self.settings.get("user_name") or self._ask_name()
+        name = self.settings.get("user_name")
         if not name:
-            self._status("Set your name first (Settings > Your name).")
+            # Ask in-app, then carry on sharing once it's set.
+            self._ask_name(then=self._share)
             return
         # Rank is board order on this machine only; everything else travels.
         tasks = [{k: v for k, v in self.store.projects[project][i].items() if k != "rank"}

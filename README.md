@@ -349,6 +349,9 @@ Paste the result straight into a Confluence page.
 | **View** | Buddy · Manager · Visual Planner · **Default view** (one option per view) · Buddy always on top |
 | **Settings** | Your name… |
 
+On **macOS** use **Cmd** wherever this guide says Ctrl (Cmd+1, Cmd+S, …);
+right-click is a two-finger click or **Ctrl+click**.
+
 | Shortcut | Action |
 |---|---|
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Buddy / Manager / Visual Planner |
@@ -394,6 +397,10 @@ folder is **gitignored** — nothing in it is ever pushed to GitHub.
   file into `profile/` as `data.json` (back up first).
 - **XLSX export is greyed out.** `openpyxl` isn't installed — use CSV, or
   `pip install openpyxl`.
+- **macOS: errors like `::tk::unsupported::MacWindowStyle` or an extra
+  Python window when typing your name.** Fixed — every text prompt (e.g.
+  **Settings → Your name…**) now opens as a panel *inside* the app window.
+  Update to the latest version.
 - **"That isn't Jira XML I can read."** Make sure you used Jira's
   **Export → XML** (not Word/printable) and copied the whole document.
 - **Buddy is off-screen** (e.g. after unplugging a monitor). Close the app,
