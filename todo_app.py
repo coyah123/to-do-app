@@ -81,6 +81,7 @@ DONE = "Done"
 TASK_FIELDS = [
     ("title", "Title"),
     ("status", "Status"),
+    ("priority", "Priority"),
     ("group", "Subgroup"),
     ("epic", "Epic"),
     ("sprint", "Sprint"),
@@ -104,13 +105,58 @@ SHARE_VERSION = 1
 # the tree column (#0) so group headers and task titles share it.
 TABLE_COLS = [
     ("status", "Status", 140, False),
+    ("priority", "Priority", 85, False),
     ("epic", "Epic", 90, False),
     ("sprint", "Sprint", 80, False),
     ("due_date", "Due", 80, False),
     ("added_date", "Created", 110, False),
 ]
 
-GROUP_OPTIONS = ["None", "Subgroup", "Epic", "Sprint", "Status"]
+# "Project" shows every project's tasks; the others show the selected project.
+GROUP_OPTIONS = ["None", "Project", "Subgroup", "Epic", "Sprint", "Status", "Priority"]
+
+# Priority levels (Jira's), highest first: name -> (color, arrow glyph).
+PRIORITIES = {
+    "Highest": ("#cd1317", "\u21c8"),   # double up arrow
+    "High": ("#e9494a", "\u2191"),
+    "Medium": ("#e97f33", "="),
+    "Low": ("#2d8738", "\u2193"),
+    "Lowest": ("#57a55a", "\u21ca"),    # double down arrow
+}
+PRIORITY_ORDER = list(PRIORITIES)
+# Sort table / sort dropdown labels -> task keys.
+SORT_OPTIONS = {"Status": "status", "Priority": "priority", "Due date": "due_date",
+                "Created": "added_date", "Title": "title", "Epic": "epic",
+                "Sprint": "sprint"}
+BUDDY_SORTS = ["Activity", "Priority", "Due date", "Title", "Created"]
+
+
+def priority_rank(task):
+    """0 = Highest ... 4 = Lowest; tasks without a priority sort last."""
+    p = task.get("priority", "")
+    return PRIORITY_ORDER.index(p) if p in PRIORITIES else len(PRIORITY_ORDER)
+
+
+def priority_label(p):
+    return f"{PRIORITIES[p][1]} {p}" if p in PRIORITIES else ""
+
+
+JIRA_PRIORITY = {
+    "highest": "Highest", "blocker": "Highest", "p1": "Highest",
+    "high": "High", "critical": "High", "p2": "High",
+    "medium": "Medium", "major": "Medium", "normal": "Medium", "p3": "Medium",
+    "low": "Low", "minor": "Low", "p4": "Low",
+    "lowest": "Lowest", "trivial": "Lowest", "p5": "Lowest",
+}
+
+
+def jira_priority(name):
+    """Map a Jira priority name (Cloud or Server) onto our five levels."""
+    n = (name or "").strip().lower()
+    if n in JIRA_PRIORITY:
+        return JIRA_PRIORITY[n]
+    m = re.match(r"^(p[1-5])\b", n)  # e.g. "P2 - High"
+    return JIRA_PRIORITY.get(m.group(1), "") if m else ""
 
 # Named per-project lists that tasks are assigned to. "group" is a plain
 # sub-folder of a project (e.g. an app), shown nested in the sidebar trees.
@@ -143,8 +189,8 @@ ALL_SPRINTS = "All sprints"
 NO_SPRINT = "(no sprint)"
 
 # Visual Planner (Trello-style board).
-PLANNER_COLUMNS = ["Status", "Subgroup", "Epic", "Sprint", "Project"]
-PLANNER_ORDER = ["Manual", "Due date", "Created", "Title"]
+PLANNER_COLUMNS = ["Status", "Priority", "Subgroup", "Epic", "Sprint", "Project"]
+PLANNER_ORDER = ["Manual", "Priority", "Due date", "Created", "Title"]
 ANY = "All"
 NONE_LABEL = "(none)"
 BOARD_BG = "#e4e9f0"
@@ -204,20 +250,8 @@ def new_task(title):
     """A task with every field present and defaults filled in."""
     task = {key: "" for key, _ in TASK_FIELDS}
     task.update(title=title, status=DEFAULT_STATUS, added_date=now_stamp(),
-                jira_made=False, links=[], fields={}, id=uuid.uuid4().hex)
+                jira_made=False, links=[], fields={}, priority="", id=uuid.uuid4().hex)
     return task
-
-
-def make_dot(master, color, size=16, radius=5.2):
-    """A small filled circle image, used as a status marker in trees."""
-    img = tk.PhotoImage(master=master, width=size, height=size)
-    c = (size - 1) / 2
-    for y in range(size):
-        row = [color if (x - c) ** 2 + (y - c) ** 2 <= radius ** 2 else "" for x in range(size)]
-        for x, px in enumerate(row):
-            if px:
-                img.put(px, (x, y))
-    return img
 
 
 def normalize_url(url):
@@ -425,6 +459,7 @@ def parse_jira_issues(text):
             "status_category": cat_el.get("key", "") if cat_el is not None else "",
             "type": get("type"),
             "priority": get("priority"),
+            "priority_level": jira_priority(get("priority")),
             "resolution": get("resolution"),
             "assignee": get("assignee"),
             "reporter": get("reporter"),
@@ -450,7 +485,7 @@ def parse_jira_issues(text):
 # Task field <- ticket value that a Jira ticket fills in on your side.
 JIRA_SYNCED = (("epic", "epic"), ("sprint", "sprint"),
                ("description", "description"), ("due_date", "due"),
-               ("jira_ref", "key"))
+               ("jira_ref", "key"), ("priority", "priority_level"))
 
 
 def jira_updates(task, issue, old_issue):
@@ -495,6 +530,39 @@ def jira_task(issue):
         task["added_date"] = issue["created"]
     task.update(jira_updates(task, issue, None))
     return task
+
+
+def make_marker(master, status_color, priority):
+    """Buddy row icon: status dot, then the priority arrow in its color."""
+    w, h = 32, 16
+    img = tk.PhotoImage(master=master, width=w, height=h)
+    c, r = 7.5, 5.2
+    for y in range(h):
+        for x in range(16):
+            if (x - c) ** 2 + (y - c) ** 2 <= r * r:
+                img.put(status_color, (x, y))
+    if priority in PRIORITIES:
+        color = PRIORITIES[priority][0]
+
+        def tri(top, up, height=4, cx=24):
+            for i in range(height):
+                half = i if up else height - 1 - i
+                for x in range(cx - half - 1, cx + half + 2):
+                    img.put(color, (x, top + i))
+
+        if priority == "Highest":
+            tri(2, True); tri(8, True)
+        elif priority == "High":
+            tri(5, True, 5)
+        elif priority == "Medium":
+            for y in (5, 6, 9, 10):
+                for x in range(19, 30):
+                    img.put(color, (x, y))
+        elif priority == "Low":
+            tri(5, False, 5)
+        else:  # Lowest
+            tri(2, False); tri(8, False)
+    return img
 
 
 def set_status(task, status):
@@ -573,6 +641,7 @@ class Store:
                 for kind in GROUP_KINDS:
                     task.setdefault(kind, "")
                 task.setdefault("links", [])
+                task.setdefault("priority", "")
                 if not isinstance(task.get("fields"), dict):
                     task["fields"] = {}
                 if not task.get("id"):  # stable identity for sharing
@@ -947,6 +1016,8 @@ class App(tk.Tk):
                     if not (self.p_hide_done.get() and st == DONE)]
         if mode == "Project":
             return [(p, p) for p in scope]
+        if mode == "Priority":
+            return [(p, priority_label(p)) for p in PRIORITY_ORDER] + [("", "No priority")]
         kind = kind_of(mode)
         return [("", f"No {mode.lower()}")] + [(n, n) for n in self._names_in(scope, kind)]
 
@@ -961,6 +1032,9 @@ class App(tk.Tk):
             return (due == "", due)
         if order == "Created":
             return (task.get("added_date", ""),)
+        if order == "Priority":
+            due = task.get("due_date", "")
+            return (priority_rank(task), due == "", due)
         if order == "Title":
             return (task.get("title", "").lower(),)
         return (task.get("rank", 0),)
@@ -1042,14 +1116,18 @@ class App(tk.Tk):
                  font=("", 10), wraplength=LIST_WIDTH - 40, justify="left",
                  anchor="w").pack(fill="x")
 
-        # Status + due date on one line.
+        # Status, priority + due date on one line.
         due = task.get("due_date", "")
-        if mode != "Status" or due:
+        if mode != "Status" or due or task.get("priority") in PRIORITIES:
             row = tk.Frame(body, bg=CARD_BG)
             row.pack(fill="x", pady=(3, 0))
             if mode != "Status":
                 tk.Label(row, text="\u25cf " + status, bg=CARD_BG, fg=color,
                          font=("", 8, "bold")).pack(side="left")
+            prio = task.get("priority", "")
+            if prio in PRIORITIES and mode != "Priority":
+                tk.Label(row, text=priority_label(prio), bg=CARD_BG, fg=PRIORITIES[prio][0],
+                         font=("", 8, "bold")).pack(side="left", padx=(6, 0))
             if due:
                 overdue = due < today and status != DONE
                 tk.Label(row, text=("! " if overdue else "") + "due " + due,
@@ -1106,6 +1184,9 @@ class App(tk.Tk):
         if mode == "Status":
             self.f_status.set(value)
             self._on_status_change()
+        elif mode == "Priority":
+            self.f_priority.set(value)
+            self._update_priority_icon()
         elif kind_of(mode) in GROUP_KINDS and value:
             kind = kind_of(mode)
             if value not in self.store.names(project, kind):
@@ -1231,6 +1312,8 @@ class App(tk.Tk):
 
         if mode == "Status":
             set_status(task, value)
+        elif mode == "Priority":
+            task["priority"] = value
         elif kind_of(mode) in GROUP_KINDS:
             task[kind_of(mode)] = value
 
@@ -1270,6 +1353,8 @@ class App(tk.Tk):
             self._update_status_pill()
             for kind, combo in self.f_kinds.items():
                 combo.set(task.get(kind, ""))
+            self.f_priority.set(task.get("priority", ""))
+            self._update_priority_icon()
 
     # -- Buddy view -------------------------------------------------------
     def _build_buddy(self):
@@ -1292,11 +1377,20 @@ class App(tk.Tk):
             command=self._toggle_pin,
         )
         self.pin_btn.pack(side="left", padx=(4, 0))
+
+        row2 = tk.Frame(f, bg=BUDDY_BG)
+        row2.pack(fill="x", padx=6, pady=(0, 2))
+        tk.Label(row2, text="Sort", bg=BUDDY_BG, fg="#665", font=("", 8)).pack(side="left")
+        self.b_sort = ttk.Combobox(row2, state="readonly", width=10, values=BUDDY_SORTS)
+        saved_sort = self.settings.get("buddy_sort", "Activity")
+        self.b_sort.set(saved_sort if saved_sort in BUDDY_SORTS else "Activity")
+        self.b_sort.pack(side="left", padx=(4, 0))
+        self.b_sort.bind("<<ComboboxSelected>>", lambda e: self._refresh_buddy())
         self.b_hide_done = tk.BooleanVar(value=self.settings.get("buddy_hide_done", True))
         tk.Checkbutton(
-            top, text="Hide done", variable=self.b_hide_done, bg=BUDDY_BG,
+            row2, text="Hide done", variable=self.b_hide_done, bg=BUDDY_BG,
             activebackground=BUDDY_BG, command=self._refresh_buddy,
-        ).pack(side="left", padx=(4, 0))
+        ).pack(side="right")
 
         self.b_summary = tk.Label(
             f, text="", bg=BUDDY_BG, fg="#665", anchor="w", font=("", 8)
@@ -1330,8 +1424,12 @@ class App(tk.Tk):
         self.b_tree.configure(yscrollcommand=ys.set)
         self.b_tree.tag_configure("project", font=("", 10, "bold"))
         self.b_tree.tag_configure("overdue", font=("", 9, "bold"))
+        self.b_tree.tag_configure("link", foreground="#1a5fb4", font=("", 8, "underline"))
+        self.b_link_rows = {}  # link row id -> url
+        self.b_tree.bind("<ButtonRelease-1>", self._buddy_link_click, add="+")
         # Status shows as a colored dot; text keeps the normal color.
-        self.b_dots = {name: make_dot(self, color) for name, (color, _) in STATUSES.items()}
+        # Row icon = status dot + priority arrow (built on demand, cached).
+        self.b_markers = {}
         self.b_tree.bind("<Double-1>", self._buddy_dblclick)
         self.b_tree.bind("<<TreeviewSelect>>", lambda e: self._buddy_update_add())
         self.b_tree.bind("<<TreeviewOpen>>", lambda e: self._buddy_fold(True))
@@ -1343,6 +1441,26 @@ class App(tk.Tk):
         self.b_meta = {}  # row id -> (project, index)
 
         self.b_status_menu = tk.Menu(self, tearoff=False)
+
+    def _buddy_marker(self, status, priority):
+        key = (status, priority if priority in PRIORITIES else "")
+        if key not in self.b_markers:
+            self.b_markers[key] = make_marker(self, STATUSES[status][0], key[1])
+        return self.b_markers[key]
+
+    def _buddy_sort_key(self, task):
+        sort = self.b_sort.get()
+        status = BUDDY_ORDER.index(task.get("status", DEFAULT_STATUS))
+        due = task.get("due_date") or "~"
+        if sort == "Priority":
+            return (priority_rank(task), status, due)
+        if sort == "Due date":
+            return (due, priority_rank(task))
+        if sort == "Title":
+            return ((task.get("title") or "").lower(),)
+        if sort == "Created":
+            return (task.get("added_date", ""),)
+        return (status, priority_rank(task), due)  # Activity
 
     def _buddy_sprints(self, projects):
         """Sprint filter choices: every project's sprints, in list order."""
@@ -1362,6 +1480,7 @@ class App(tk.Tk):
         sprint = self._buddy_sprints(projects)
         self.settings["buddy_sprint"] = sprint
         self.settings["buddy_hide_done"] = self.b_hide_done.get()
+        self.settings["buddy_sort"] = self.b_sort.get()
         # Collapsed folders: "project" or "project/group".
         collapsed = set(self.settings.get("buddy_collapsed", []))
         today = datetime.now().strftime("%Y-%m-%d")
@@ -1372,7 +1491,8 @@ class App(tk.Tk):
             keep = self.b_meta.get(selected[0]) or self.b_folder_rows.get(selected[0])
 
         self.b_tree.delete(*self.b_tree.get_children())
-        self.b_meta, self.b_folder_rows = {}, {}
+        self.b_meta, self.b_folder_rows, self.b_link_rows = {}, {}, {}
+        open_tasks = set(self.settings.get("buddy_open_tasks", []))
         counts = {st: 0 for st in STATUS_ORDER}
         reselect = None
 
@@ -1396,10 +1516,7 @@ class App(tk.Tk):
                 if sprint not in (ALL_SPRINTS, NO_SPRINT) and t.get("sprint") != sprint:
                     continue
                 items.append((i, t))
-            items.sort(key=lambda it: (
-                BUDDY_ORDER.index(it[1].get("status", DEFAULT_STATUS)),
-                it[1].get("due_date") or "~",
-            ))
+            items.sort(key=lambda it: self._buddy_sort_key(it[1]))
             for _, t in items:
                 counts[t.get("status", DEFAULT_STATUS)] += 1
 
@@ -1419,13 +1536,21 @@ class App(tk.Tk):
                     due = due[5:]  # MM-DD keeps the column narrow
                 if overdue:
                     due = "! " + due
+                links = t.get("links") or []
                 rid = self.b_tree.insert(
                     parents.get(t.get("group"), parents[""]), "end",
-                    text=" " + (t.get("title") or "(untitled)"),
-                    image=self.b_dots[status], values=(due,),
+                    text=" " + (t.get("title") or "(untitled)")
+                    + (f"  \U0001F517{len(links)}" if links else ""),
+                    image=self._buddy_marker(status, t.get("priority", "")), values=(due,),
                     tags=("overdue",) if overdue else (),
+                    open=t.get("id") in open_tasks,
                 )
                 self.b_meta[rid] = (project, i)
+                # Links tuck under the task: click the arrow to show/hide.
+                for link in links:
+                    lid = self.b_tree.insert(rid, "end", text="\u2197 " + (link.get("title") or link["url"]),
+                                             tags=("link",))
+                    self.b_link_rows[lid] = link["url"]
                 if keep == (project, i):
                     reselect = rid
 
@@ -1437,8 +1562,18 @@ class App(tk.Tk):
         self._buddy_update_add()
 
     def _buddy_fold(self, opened):
-        """Remember which projects/groups are collapsed."""
-        key = self.b_folder_rows.get(self.b_tree.focus())
+        """Remember which projects/groups are collapsed and which tasks
+        have their links shown."""
+        row = self.b_tree.focus()
+        if row in self.b_meta:
+            project, i = self.b_meta[row]
+            task_id = self.store.projects[project][i].get("id")
+            shown = set(self.settings.get("buddy_open_tasks", []))
+            (shown.add if opened else shown.discard)(task_id)
+            self.settings["buddy_open_tasks"] = sorted(shown)
+            save_settings(self.settings)
+            return
+        key = self.b_folder_rows.get(row)
         if not key:
             return
         project, group = key
@@ -1455,8 +1590,11 @@ class App(tk.Tk):
         if sel:
             if sel[0] in self.b_folder_rows:
                 return self.b_folder_rows[sel[0]]
-            if sel[0] in self.b_meta:
-                project, i = self.b_meta[sel[0]]
+            row = sel[0]
+            if row in self.b_link_rows:
+                row = self.b_tree.parent(row)
+            if row in self.b_meta:
+                project, i = self.b_meta[row]
                 return project, self.store.projects[project][i].get("group", "")
         last = self.settings.get("buddy_add_project")
         return (last, "") if last in self.store.projects else (None, "")
@@ -1482,6 +1620,12 @@ class App(tk.Tk):
         self.settings["buddy_add_project"] = project
         self.b_entry.delete(0, "end")
         self._refresh_buddy()
+
+    def _buddy_link_click(self, event):
+        """A click on a link row opens it."""
+        row = self.b_tree.identify_row(event.y)
+        if row in self.b_link_rows and self.b_tree.identify_element(event.x, event.y) != "Treeitem.indicator":
+            self._open_link(self.b_link_rows[row])
 
     def _buddy_dblclick(self, event):
         rid = self.b_tree.identify_row(event.y)
@@ -1666,6 +1810,13 @@ class App(tk.Tk):
         )
         group_cb.pack(side="left", padx=(4, 12))
         group_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_table())
+        ttk.Label(ctrl, text="Sort by").pack(side="left")
+        self.sort_var = tk.StringVar(value="Status")
+        sort_cb = ttk.Combobox(ctrl, textvariable=self.sort_var, values=list(SORT_OPTIONS),
+                               state="readonly", width=9)
+        sort_cb.pack(side="left", padx=(4, 12))
+        sort_cb.bind("<<ComboboxSelected>>",
+                     lambda e: self._sort_by(SORT_OPTIONS[self.sort_var.get()], keep_dir=True))
         self.hide_done = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             ctrl, text="Hide Done", variable=self.hide_done,
@@ -1782,6 +1933,17 @@ class App(tk.Tk):
             st_wrap, text="", fg="white", font=("", 9, "bold"), padx=8
         )
         self.status_pill.pack(side="left", padx=6)
+        r += 1
+
+        ttk.Label(form, text="Priority").grid(row=r, column=0, sticky="e", **pad)
+        pr_wrap = ttk.Frame(form)
+        pr_wrap.grid(row=r, column=1, columnspan=3, sticky="ew", **pad)
+        self.f_priority = ttk.Combobox(pr_wrap, values=[""] + PRIORITY_ORDER,
+                                       state="readonly", width=20)
+        self.f_priority.pack(side="left")
+        self.f_priority.bind("<<ComboboxSelected>>", lambda e: self._update_priority_icon())
+        self.f_priority_icon = tk.Label(pr_wrap, text="", font=("", 11, "bold"))
+        self.f_priority_icon.pack(side="left", padx=6)
         r += 1
 
         ttk.Label(form, text="Epic").grid(row=r, column=0, sticky="e", **pad)
@@ -2029,6 +2191,7 @@ class App(tk.Tk):
             "epic": self.f_epic.get().strip(), "sprint": self.f_sprint.get().strip(),
             "description": self.f_desc.get("1.0", "end").strip(),
             "due_date": self.f_due.get().strip(), "status": self.f_status.get(),
+            "priority": self.f_priority.get(),
             "completed_date": self._completed_date, "links": self._links,
             "jira_made": self.f_jira_made.get(),
             "jira_ref": self.f_jira_ref.get().strip() if self.f_jira_made.get() else "",
@@ -2043,6 +2206,9 @@ class App(tk.Tk):
                 self.f_kinds[kind].set(updates[kind])
         if "description" in updates:
             self._set_text(self.f_desc, updates["description"])
+        if "priority" in updates:
+            self.f_priority.set(updates["priority"])
+            self._update_priority_icon()
         if "jira_made" in updates:
             self.f_jira_made.set(True)
             self._toggle_jira()
@@ -2065,7 +2231,7 @@ class App(tk.Tk):
         self._render_jira()
         labels = {"epic": "epic", "sprint": "sprint", "description": "description",
                   "due_date": "due date", "completed_date": "completed date",
-                  "jira_ref": "Jira ticket number"}
+                  "jira_ref": "Jira ticket number", "priority": "priority"}
         filled = [labels[k] for k in updates if k in labels]
         if "links" in updates:
             n = len(updates["links"]) - len(current["links"])
@@ -2347,6 +2513,11 @@ class App(tk.Tk):
         state = "normal" if self.f_jira_made.get() else "disabled"
         self.f_jira_ref.configure(state=state)
 
+    def _update_priority_icon(self):
+        p = self.f_priority.get()
+        color, glyph = PRIORITIES.get(p, ("#888", ""))
+        self.f_priority_icon.configure(text=glyph, fg=color)
+
     def _update_status_pill(self):
         status = self.f_status.get()
         color = STATUSES.get(status, STATUSES[DEFAULT_STATUS])[0]
@@ -2365,7 +2536,7 @@ class App(tk.Tk):
         state = "normal" if enabled else "disabled"
         for w in (self.f_title, self.f_due, self.f_desc, self.f_blockers, self.f_notes):
             w.configure(state=state)
-        for w in (self.status_cb, self.f_group, self.f_epic, self.f_sprint):
+        for w in (self.status_cb, self.f_priority, self.f_group, self.f_epic, self.f_sprint):
             w.configure(state="readonly" if enabled else "disabled")
         self.jira_chk.state(["!disabled"] if enabled else ["disabled"])
         for w in (self.f_link_title, self.f_link_desc, self.f_link_url, self.f_link_btn,
@@ -2412,6 +2583,8 @@ class App(tk.Tk):
         self._set_entry(self.f_jira_ref, task.get("jira_ref", ""))
         self._toggle_jira()
         self.f_status.set(task.get("status", DEFAULT_STATUS))
+        self.f_priority.set(task.get("priority", ""))
+        self._update_priority_icon()
         self._added_date = task.get("added_date", "")
         self._completed_date = task.get("completed_date", "")
         self.f_added_lbl.configure(text=f"Created: {self._added_date or '-'}")
@@ -2538,15 +2711,22 @@ class App(tk.Tk):
         col = self.sort_col
         if col == "status":
             primary = STATUS_ORDER.index(task.get("status", DEFAULT_STATUS))
-            return (primary, task.get("due_date") or "~")
+            return (primary, priority_rank(task), task.get("due_date") or "~")
+        if col == "priority":
+            return (priority_rank(task), STATUS_ORDER.index(task.get("status", DEFAULT_STATUS)),
+                    task.get("due_date") or "~")
         v = (task.get(col) or "").lower()
         return (v == "", v)  # blanks last
 
-    def _sort_by(self, col):
-        if self.sort_col == col:
+    def _sort_by(self, col, keep_dir=False):
+        if self.sort_col == col and not keep_dir:
             self.sort_rev = not self.sort_rev
-        else:
+        elif self.sort_col != col:
             self.sort_col, self.sort_rev = col, False
+        # keep the Sort by dropdown in step with header clicks
+        label = next((k for k, v in SORT_OPTIONS.items() if v == col), None)
+        if label:
+            self.sort_var.set(label)
         for key, heading in [("title", "Title")] + [c[:2] for c in TABLE_COLS]:
             arrow = (" ▼" if self.sort_rev else " ▲") if key == col else ""
             self.table.heading("#0" if key == "title" else key, text=heading + arrow)
@@ -2555,32 +2735,43 @@ class App(tk.Tk):
 
     def _refresh_table(self):
         self.table.delete(*self.table.get_children())
-        self.row_meta = {}
+        self.row_meta = {}  # row id -> (project, task index)
+        group = self.group_var.get()
+        all_projects = group == "Project"
         project = self.active_project
-        if not project or project not in self.store.projects:
+        if all_projects:
+            scope = sorted(self.store.projects, key=str.lower)
+        elif project in self.store.projects:
+            scope = [project]
+        else:
             self.context_var.set("No project selected.")
             return
 
-        tasks = self.store.projects[project]
-        open_count = sum(1 for t in tasks if t.get("status") != DONE)
-        self.context_var.set(f"{project}  -  {open_count} open / {len(tasks)} total")
+        every = [(p, i, t) for p in scope for i, t in enumerate(self.store.projects[p])]
+        open_count = sum(1 for _, _, t in every if t.get("status") != DONE)
+        title = "All projects" if all_projects else project
+        self.context_var.set(f"{title}  -  {open_count} open / {len(every)} total")
 
-        items = [(i, t) for i, t in enumerate(tasks)
-                 if not (self.hide_done.get() and t.get("status") == DONE)]
-        items.sort(key=lambda it: self._sort_key(it[1]), reverse=self.sort_rev)
+        items = [it for it in every
+                 if not (self.hide_done.get() and it[2].get("status") == DONE)]
+        items.sort(key=lambda it: self._sort_key(it[2]), reverse=self.sort_rev)
 
-        group = self.group_var.get()
         if group == "None":
-            for i, t in items:
-                self._insert_row("", i, t)
+            for p, i, t in items:
+                self._insert_row("", p, i, t)
             return
 
-        key = kind_of(group)
+        key = "project" if all_projects else kind_of(group)
         groups = {}
-        for i, t in items:
-            groups.setdefault(t.get(key) or "", []).append((i, t))
-        if key == "status":
+        for p, i, t in items:
+            value = p if all_projects else (t.get(key) or "")
+            groups.setdefault(value, []).append((p, i, t))
+        if all_projects:
+            names = [p for p in scope if p in groups]
+        elif key == "status":
             names = [s for s in STATUS_ORDER if s in groups]
+        elif key == "priority":
+            names = [p for p in PRIORITY_ORDER if p in groups] + ([""] if "" in groups else [])
         else:
             # The project's list order, then anything not in the list.
             names = [g for g in self.store.names(project, key) if g in groups]
@@ -2589,26 +2780,30 @@ class App(tk.Tk):
                 names.append("")
         for name in names:
             label = name or f"(no {group.lower()})"
+            if all_projects:
+                label = "\U0001F4C1 " + name
             gid = self.table.insert(
                 "", "end", text=f"{label}  ({len(groups[name])})",
                 open=True, tags=("group",),
             )
-            for i, t in groups[name]:
-                self._insert_row(gid, i, t)
+            for p, i, t in groups[name]:
+                self._insert_row(gid, p, i, t)
 
-    def _insert_row(self, parent, index, task):
+    def _insert_row(self, parent, project, index, task):
         status = task.get("status", DEFAULT_STATUS)
         values = []
         for key, *_ in TABLE_COLS:
             v = task.get(key, "")
             if key == "status":
                 v = "● " + v
+            elif key == "priority":
+                v = priority_label(v)
             values.append(v)
         rid = self.table.insert(
             parent, "end", text=task.get("title") or "(untitled)",
             values=values, tags=(STATUSES[status][1],),
         )
-        self.row_meta[rid] = index
+        self.row_meta[rid] = (project, index)
 
     def _sync_selection(self):
         """Highlight the current project/task in both tree and table."""
@@ -2633,8 +2828,9 @@ class App(tk.Tk):
                 self.tree.selection_remove(self.tree.selection())
 
             row = None
-            for rid, idx in self.row_meta.items():
-                if idx == self.editing_index:
+            current = (self.active_project, self.editing_index)
+            for rid, key in self.row_meta.items():
+                if self.editing_index is not None and key == current:
                     row = rid
                     break
             if row:
@@ -2793,7 +2989,7 @@ class App(tk.Tk):
             return
         sel = self.table.selection()
         if sel and sel[0] in self.row_meta:
-            self._select_task(self.active_project, self.row_meta[sel[0]])
+            self._select_task(*self.row_meta[sel[0]])
 
     # -- project actions --------------------------------------------------
     def _add_project(self):
@@ -2928,6 +3124,7 @@ class App(tk.Tk):
         task = {
             "title": title,
             "status": status,
+            "priority": self.f_priority.get(),
             "group": self.f_group.get().strip(),
             "epic": self.f_epic.get().strip(),
             "sprint": self.f_sprint.get().strip(),

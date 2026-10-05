@@ -51,6 +51,7 @@ airgapped work machine. Runs on **Windows, macOS and Linux**.
 | **Epic / Sprint** | Per-project labels you can group, filter and plan by. Optional. |
 | **Task** | The to-do item: title, status, dates, notes, links, custom fields, an attached Jira ticket… |
 | **Status** | Not started (grey) · In Progress (purple) · Blocked (red) · Waiting for approval (orange) · Done (green) |
+| **Priority** | ⇈ Highest · ↑ High · = Medium · ↓ Low · ⇊ Lowest (Jira's levels), or none |
 
 Subgroups, epics and sprints are each a named list per project, managed in
 Manager's **Subgroups, Epics & Sprints** tab. Statuses are color-coded
@@ -76,13 +77,19 @@ top**).
 - Every project is a **bold, collapsible** folder, with its **subgroups** as
   sub-folders and tasks underneath. Collapsed folders stay collapsed between
   sessions.
-- A **colored dot** on the left of each task shows its status; text stays
-  black. Most active work is listed first (In Progress, Blocked, Waiting,
-  Not started), then by due date.
+- A **colored dot** on the left of each task shows its status, followed by
+  its **priority arrow** (red ⇈ Highest, ↑ High, orange = Medium, green ↓
+  Low, ⇊ Lowest); text stays black.
+- **Sort** dropdown: **Activity** (default — In Progress, Blocked, Waiting,
+  Not started, then priority and due date), **Priority** (highest first),
+  **Due date**, **Title** or **Created**.
 - Due dates show on the right as `MM-DD`; **overdue** tasks are bold and
   marked `!`.
 - **Sprint filter** at the top (All sprints / no sprint / a specific
   sprint) and a **Hide done** checkbox.
+- **Links:** a task with links shows 🔗 and a count; click its arrow to
+  **show/hide** them underneath, then click a link to open it in your
+  browser. Buddy remembers which tasks you left expanded.
 - The summary line counts what's open (e.g. `2 in progress · 1 blocked`).
 - **Quick-add:** select a project, subgroup or task, then type in the box
   at the bottom and press Enter. The label beside it shows where the task
@@ -103,9 +110,13 @@ Three resizable panes:
    **Delete Project**.
 2. **Center — two tabs:**
    - **Tasks:** a table of the selected project's tasks (Title, Status,
-     Epic, Sprint, Due, Created). **Group by** Subgroup / Epic / Sprint /
-     Status / None, click a column header to sort (click again to reverse),
-     and **Hide Done**. The header also holds **Share… / Import…** and
+     Priority, Epic, Sprint, Due, Created). **Group by** Project / Subgroup /
+     Epic / Sprint / Status / Priority / None — **Project** shows *every*
+     project's tasks grouped under each project (click any one to edit it);
+     the other groupings show the selected project. **Sort by** Status, Priority, Due
+     date, Created, Title, Epic or Sprint — or click a column header (click
+     again to reverse). Sorting by Priority puts Highest first, then by
+     status and due date; tasks without a priority go last. **Hide Done**. The header also holds **Share… / Import…** and
      **Export CSV / Export XLSX**.
    - **Subgroups, Epics & Sprints:** pick a project, then add, rename or
      delete its subgroups, epics and sprints. Each list shows how many tasks
@@ -116,17 +127,18 @@ Three resizable panes:
 
 ### Visual Planner (Ctrl+3) — a Trello-style board
 
-- **Columns by:** Status, Subgroup, Epic, Sprint or Project. Status columns
+- **Columns by:** Status, Priority, Subgroup, Epic, Sprint or Project. Status columns
   have a colored bar; every column shows a count.
 - **Filters:** Project (or All projects), Epic, Sprint (each with a
   "(none)" option) and **Hide Done**.
-- **Order:** Manual (you arrange cards), Due date, Created or Title.
+- **Order:** Manual (you arrange cards), Priority (highest first), Due
+  date, Created or Title.
 - **Cards** show a status-colored stripe, the title, status, due date
-  (overdue in red with `!`), and tags for project, subgroup, epic, sprint,
+  (overdue in red with `!`), priority, and tags for project, subgroup, epic, sprint,
   Jira ref, link count (🔗) and who shared it — leaving out whatever the
   columns already show.
 - **Drag a card** to another column to change that field: status (moving to
-  Done stamps the completed date), subgroup, epic, sprint, or — with
+  Done stamps the completed date), priority, subgroup, epic, sprint, or — with
   columns by Project — move the task to another project. In **Manual**
   order you can also drag cards up and down; a blue line shows where it
   will land and the order is saved.
@@ -152,6 +164,7 @@ tabs.
 |---|---|
 | **Title** | Required. |
 | **Status** | Dropdown with a colored badge. Choosing **Done** stamps the Completed date; moving off Done clears it. |
+| **Priority** | Highest / High / Medium / Low / Lowest (blank = none), shown with its colored arrow. |
 | **Epic / Sprint / Subgroup** | Picked from the project's lists (blank = none). |
 | **Due** | Free text; use `YYYY-MM-DD` so sorting and overdue marks work. |
 | **Jira** | "Ticket made" checkbox + a box for the ticket number/link. Filled in automatically from an attached ticket; the ticket and its Jira links also appear as clickable **quick links** at the bottom of the form. |
@@ -296,6 +309,7 @@ isn't valid Jira XML, it stays in the box and the status bar says why.
 
 | Your field | From the ticket |
 |---|---|
+| **Priority** | The ticket's priority. Jira Server names are converted: Blocker → Highest, Critical → High, Major → Medium, Minor → Low, Trivial → Lowest (also P1–P5) |
 | **Jira (ticket made / number)** | "Ticket made" is ticked and the number is set to the ticket key, e.g. `MDA-12` |
 | **Epic / Sprint** | The ticket's epic and sprint (also added to the project's lists, so you can filter by them) |
 | **Description** | The Jira description (HTML converted to readable text) |
@@ -306,7 +320,7 @@ isn't valid Jira XML, it stays in the box and the status bar says why.
 
 **Your edits always win:**
 
-- Jira number, epic, sprint, description and due date are filled in only when **your
+- Jira number, priority, epic, sprint, description and due date are filled in only when **your
   field is empty**, or when it **still holds what the ticket put there
   last time** (so a refreshed ticket — e.g. a new due date — updates it).
   As soon as you type your own value, refreshing the ticket leaves it alone.
@@ -360,7 +374,7 @@ Buttons in Manager's header export **every task in every project**:
   - 🔴 red: openpyxl not found, XLSX button disabled. Install with
     `pip install openpyxl` if your environment allows it; otherwise use CSV.
 
-Columns: Project, Title, Status, Subgroup, Epic, Sprint, Description,
+Columns: Project, Title, Status, Priority, Subgroup, Epic, Sprint, Description,
 Created/Due/Completed dates, Jira fields, Blockers, Notes, Links (one
 `title: URL` per line), Shared By, then **one column per custom field**.
 Paste the result straight into a Confluence page.
