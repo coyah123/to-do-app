@@ -508,14 +508,34 @@ JIRA_SYNCED = (("epic", "epic"), ("sprint", "sprint"),
                ("jira_ref", "key"), ("priority", "priority_level"))
 
 
+def jira_is_done(issue):
+    """Is the ticket finished in Jira? Any of: a resolved date, a Resolution
+    other than Unresolved, or a done status (Done/Closed/Resolved or Jira's
+    "done" status category)."""
+    resolution = (issue.get("resolution") or "").strip().lower()
+    return bool(issue.get("resolved")
+                or resolution not in ("", "unresolved", "none")
+                or jira_status(issue.get("status"), issue.get("status_category")) == DONE)
+
+
+def jira_app_status(issue):
+    """The ticket's status in this app's terms: To Do -> Not started,
+    In Progress -> In Progress, Done (or resolved) -> Done."""
+    if jira_is_done(issue):
+        return DONE
+    return jira_status(issue.get("status"), issue.get("status_category"))
+
+
 def jira_updates(task, issue, old_issue):
     """What a (re)attached ticket fills in on the task.
 
     Epic, sprint, description and due date: taken from the ticket only if
     your field is empty, or still holds what the previous copy of the ticket
-    put there - anything you wrote yourself is kept. Resolved in Jira: the
-    task becomes Done with Jira's resolved date as its completed date (only
-    for a resolution not seen before, so reopening it yourself sticks). Links: every link in the
+    put there - anything you wrote yourself is kept. Status: follows the
+    ticket (To Do / In Progress / Done) when first linked and whenever it
+    changes in Jira; a status you set yourself sticks until Jira's changes.
+    Done is completed on Jira's resolved date (or its last update). Links:
+    every link in the
     ticket that isn't on the task yet (ones you removed after an earlier
     attach aren't re-added)."""
     old = old_issue or {}
@@ -529,11 +549,15 @@ def jira_updates(task, issue, old_issue):
         updates["jira_made"] = True  # "Ticket made" - it clearly exists
     resolved = issue.get("resolved", "")
     done_date = task.get("completed_date", "")
-    if resolved and task.get("status") != DONE and resolved != old.get("resolved"):
-        # Resolved in Jira -> Done here. Only for a resolution we haven't seen
-        # yet, so reopening the task yourself sticks across refreshes.
-        updates["status"] = DONE
-        updates["completed_date"] = resolved
+    # Status follows Jira when it's new to this task or has changed there
+    # (remembered on the task, so a status you set yourself sticks).
+    jira_now = jira_app_status(issue)
+    if jira_now != task.get("jira_status_seen"):
+        updates["jira_status_seen"] = jira_now
+        if task.get("status") != jira_now:
+            updates["status"] = jira_now
+            updates["completed_date"] = (
+                (resolved or issue.get("updated") or now_stamp()) if jira_now == DONE else "")
     elif (resolved and task.get("status") == DONE and resolved != done_date
             and (not done_date or done_date == old.get("resolved"))):
         updates["completed_date"] = resolved
@@ -2470,6 +2494,9 @@ class App(tk.Tk):
             "due_date": self.f_due.get().strip(), "status": self.f_status.get(),
             "priority": self.f_priority.get(),
             "completed_date": self._completed_date, "links": self._links,
+            "jira_status_seen": (self.store.projects[project][self.editing_index]
+                                 .get("jira_status_seen") if self.editing_index is not None
+                                 else ""),
             "jira_made": self.f_jira_made.get(),
             "jira_ref": self.f_jira_ref.get().strip() if self.f_jira_made.get() else "",
         }
@@ -2486,6 +2513,8 @@ class App(tk.Tk):
         if "status" in updates:
             self.f_status.set(updates["status"])
             self._update_status_pill()
+            self._completed_date = updates.get("completed_date", "")
+            self.f_completed_lbl.configure(text=f"Completed: {self._completed_date or '-'}")
         if "priority" in updates:
             self.f_priority.set(updates["priority"])
             self._update_priority_icon()
@@ -2512,8 +2541,8 @@ class App(tk.Tk):
         labels = {"epic": "epic", "sprint": "sprint", "description": "description",
                   "due_date": "due date", "completed_date": "completed date",
                   "jira_ref": "Jira ticket number", "priority": "priority",
-                  "status": "status Done (resolved in Jira)"}
-        filled = [labels[k] for k in updates if k in labels]
+                  "status": "status (from Jira)"}
+        filled = [labels[k] for k in updates if k in labels and updates[k]]
         if "links" in updates:
             n = len(updates["links"]) - len(current["links"])
             filled.append(f"{n} link{'s' if n != 1 else ''}")
