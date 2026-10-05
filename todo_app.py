@@ -17,13 +17,18 @@ Runs on Windows, macOS, and Linux.
 """
 
 import csv
+import html
 import json
 import os
 import re
 import tkinter as tk
+import uuid
 import webbrowser
+import xml.etree.ElementTree as ET
 from datetime import datetime
-from tkinter import filedialog, messagebox, ttk
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # ---------------------------------------------------------------------------
 # Optional dependency: openpyxl (for .xlsx export). Degrade gracefully.
@@ -71,7 +76,12 @@ TASK_FIELDS = [
     ("blockers", "Blockers"),
     ("notes", "Notes"),
     ("links", "Links"),  # list of {"title", "description", "url"}
+    ("shared_by", "Shared By"),  # set on tasks imported from a coworker
 ]
+
+# Shared-task files (File > Share selected / Import shared tasks).
+SHARE_FORMAT = "todo-tracker-share"
+SHARE_VERSION = 1
 
 # Center table columns: (key, heading, width, stretch). The title lives in
 # the tree column (#0) so group headers and task titles share it.
@@ -136,7 +146,7 @@ def new_task(title):
     """A task with every field present and defaults filled in."""
     task = {key: "" for key, _ in TASK_FIELDS}
     task.update(title=title, status=DEFAULT_STATUS, added_date=now_stamp(),
-                jira_made=False, links=[])
+                jira_made=False, links=[], id=uuid.uuid4().hex)
     return task
 
 
@@ -160,6 +170,174 @@ def normalize_url(url):
             or url.startswith("\\\\")):                         # \\server\share
         return url
     return "https://" + url
+
+
+# ---------------------------------------------------------------------------
+# Jira XML import (Jira's "Export > XML" / RSS format, one or many issues)
+# ---------------------------------------------------------------------------
+class _HTMLText(HTMLParser):
+    """Jira descriptions/comments are HTML; flatten them to readable text."""
+
+    BLOCKS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+              "pre", "blockquote", "table", "ul", "ol"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "li":
+            self.parts.append("\n- ")
+        elif tag in self.BLOCKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.BLOCKS and tag != "li":
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def html_to_text(markup):
+    if not markup:
+        return ""
+    parser = _HTMLText()
+    parser.feed(markup)
+    text = html.unescape("".join(parser.parts)).replace("\xa0", " ")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def jira_date(value, with_time=False):
+    """'Fri, 13 Oct 2023 09:30:00 -0400' -> '2023-10-13' (or with HH:MM)."""
+    if not value or not value.strip():
+        return ""
+    try:
+        dt = parsedate_to_datetime(value.strip())
+    except (TypeError, ValueError):
+        return value.strip()
+    return dt.strftime("%Y-%m-%d %H:%M" if with_time else "%Y-%m-%d")
+
+
+def jira_status(name, category):
+    """Map a Jira status (+ its category) onto this app's statuses."""
+    n = (name or "").lower()
+    if "block" in n or "impediment" in n or "on hold" in n:
+        return "Blocked"
+    if any(w in n for w in ("approv", "review", "waiting", "pending", "verif", "test")):
+        return "Waiting for approval"
+    if category == "done" or n in ("done", "closed", "resolved", "complete", "completed"):
+        return DONE
+    if category == "indeterminate" or "progress" in n:
+        return "In Progress"
+    return DEFAULT_STATUS
+
+
+def parse_jira_xml(text):
+    """Turn a Jira XML export into (jira project name, task dict) pairs."""
+    root = ET.fromstring(text)
+    items = root.findall(".//item")
+    if not items:
+        raise ValueError("No Jira issues (<item>) found in that file.")
+
+    out = []
+    for item in items:
+        def get(tag):
+            el = item.find(tag)
+            return (el.text or "").strip() if el is not None and el.text else ""
+
+        def all_text(path):
+            return [(e.text or "").strip() for e in item.findall(path) if (e.text or "").strip()]
+
+        key = get("key")
+        status_el = item.find("statuscategory")
+        if status_el is None:
+            status_el = item.find("statusCategory")
+        category = status_el.get("key", "") if status_el is not None else ""
+        status = jira_status(get("status"), category)
+
+        # Custom fields: Sprint, Epic Link, Story Points, ...
+        custom = {}
+        for cf in item.findall("customfields/customfield"):
+            name = (cf.findtext("customfieldname") or "").strip()
+            values = [(v.text or "").strip() for v in cf.findall("customfieldvalues/customfieldvalue")
+                      if (v.text or "").strip()]
+            if name and values:
+                custom[name] = values
+        sprint = ""
+        if custom.get("Sprint"):
+            sprint = custom["Sprint"][-1]  # the latest sprint it was in
+            m = re.search(r"name=([^,\]]+)", sprint)  # Jira Server's long form
+            if m:
+                sprint = m.group(1).strip()
+        epic = (custom.get("Epic Link") or custom.get("Parent Link") or [""])[0]
+        if not epic and item.find("parent") is not None and get("type").lower() not in ("sub-task", "subtask"):
+            epic = get("parent")
+
+        # "is blocked by" links become Blockers.
+        blockers = []
+        for lt in item.findall("issuelinks/issuelinktype"):
+            for direction in lt:
+                desc = direction.get("description", "")
+                if "blocked by" in desc.lower():
+                    for k in direction.findall("issuelink/issuekey"):
+                        blockers.append(f"{desc} {(k.text or '').strip()}")
+
+        title = get("summary") or re.sub(r"^\[[^\]]+\]\s*", "", get("title")) or key or "(untitled)"
+        link = get("link")
+
+        notes = [f"Imported from Jira {key}".strip()]
+        for label, value in (
+            ("Type", get("type")), ("Priority", get("priority")),
+            ("Jira status", get("status")), ("Resolution", get("resolution")),
+            ("Assignee", get("assignee")), ("Reporter", get("reporter")),
+            ("Labels", ", ".join(all_text("labels/label"))),
+            ("Components", ", ".join(all_text("component"))),
+            ("Fix versions", ", ".join(all_text("fixVersion"))),
+            ("Affects versions", ", ".join(all_text("version"))),
+            ("Environment", html_to_text(get("environment"))),
+            ("Created in Jira", jira_date(get("created"), True)),
+            ("Updated in Jira", jira_date(get("updated"), True)),
+            ("Parent", get("parent")),
+        ):
+            if value and value.lower() not in ("unresolved", "unassigned", "none"):
+                notes.append(f"{label}: {value}")
+        for name, values in custom.items():
+            if name not in ("Sprint", "Epic Link", "Parent Link", "Rank") and len(", ".join(values)) < 200:
+                notes.append(f"{name}: {', '.join(values)}")
+        subtasks = all_text("subtasks/subtask")
+        if subtasks:
+            notes.append("Subtasks: " + ", ".join(subtasks))
+        comments = item.findall("comments/comment")
+        if comments:
+            notes.append("\nComments:")
+            for c in comments:
+                who = c.get("author", "")
+                when = jira_date(c.get("created", ""), True)
+                body = html_to_text(c.text or "")
+                notes.append(f"- {who} ({when}): {body}" if who or when else f"- {body}")
+
+        task = new_task(title)
+        task.update(
+            id=f"jira:{key}" if key else task["id"],
+            status=status,
+            epic=epic,
+            sprint=sprint,
+            description=html_to_text(get("description")),
+            due_date=jira_date(get("due")),
+            completed_date=jira_date(get("resolved"), True) if status == DONE else "",
+            jira_made=bool(key),
+            jira_ref=key,
+            blockers="\n".join(blockers),
+            notes="\n".join(notes),
+            links=[{"title": key or "Jira ticket", "description": "Jira ticket",
+                    "url": link}] if link else [],
+        )
+        project_el = item.find("project")
+        project = (project_el.text or "").strip() if project_el is not None else ""
+        out.append((project or (key.split("-")[0] if "-" in key else "Jira"), task))
+    return out
 
 
 def set_status(task, status):
@@ -228,6 +406,8 @@ class Store:
                 for kind in GROUP_KINDS:
                     task.setdefault(kind, "")
                 task.setdefault("links", [])
+                if not task.get("id"):  # stable identity for sharing
+                    task["id"] = uuid.uuid4().hex
             for task in tasks:
                 if not isinstance(task.get("rank"), (int, float)):
                     task["rank"] = self._next_rank()
@@ -268,6 +448,8 @@ class Store:
 
     def add_task(self, project, task):
         task.setdefault("rank", self._next_rank())
+        if not task.get("id"):
+            task["id"] = uuid.uuid4().hex
         self.projects[project].append(task)
         self.save()
 
@@ -397,7 +579,15 @@ class App(tk.Tk):
             label="Buddy always on top", variable=self.pin_var,
             command=self._apply_pin,
         )
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Share selected\u2026", command=self._share)
+        file_menu.add_command(label="Import shared tasks\u2026", command=self._import_shared)
+        file_menu.add_command(label="Import Jira XML\u2026", command=self._import_jira)
+        menubar.add_cascade(label="File", menu=file_menu)
         menubar.add_cascade(label="View", menu=view_menu)
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu.add_command(label="Your name\u2026", command=self._ask_name)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
         self.config(menu=menubar)
 
     def _save_default_view(self):
@@ -695,6 +885,8 @@ class App(tk.Tk):
             meta.append(task["jira_ref"])
         if task.get("links"):
             meta.append(f"\U0001F517 {len(task['links'])}")
+        if task.get("shared_by"):
+            meta.append(f"from {task['shared_by']}")
         if meta:
             tk.Label(body, text="   ".join(meta), bg=CARD_BG, fg="#667",
                      font=("", 8), wraplength=LIST_WIDTH - 40, justify="left",
@@ -1130,6 +1322,7 @@ class App(tk.Tk):
         m.add_separator()
         m.add_command(label="Open in Manager",
                       command=lambda: self._buddy_open_task(project, index))
+        m.add_command(label="Share task\u2026", command=self._share)
         m.tk_popup(event.x_root, event.y_root)
 
     def _buddy_open_task(self, project, index):
@@ -1262,6 +1455,9 @@ class App(tk.Tk):
             side="right", padx=4
         )
         self.dot.pack(side="right", padx=(0, 2))
+        ttk.Separator(header, orient="vertical").pack(side="right", fill="y", padx=8)
+        ttk.Button(header, text="Import\u2026", command=self._import_shared).pack(side="right")
+        ttk.Button(header, text="Share\u2026", command=self._share).pack(side="right", padx=4)
         if not HAVE_OPENPYXL:
             self.xlsx_btn.state(["disabled"])
 
@@ -1430,6 +1626,8 @@ class App(tk.Tk):
         self.f_completed_lbl = ttk.Label(dates, text="Completed: -", foreground="#666",
                                          font=("", 8))
         self.f_completed_lbl.pack(side="left", padx=(12, 0))
+        self.f_from_lbl = ttk.Label(dates, text="", foreground="#8e44ad", font=("", 8, "bold"))
+        self.f_from_lbl.pack(side="left", padx=(12, 0))
         r += 1
 
         btnrow = ttk.Frame(form)
@@ -1637,6 +1835,8 @@ class App(tk.Tk):
         self.f_added_lbl.configure(text=f"Created: {self._added_date or '-'}")
         self.f_completed_lbl.configure(text=f"Completed: {self._completed_date or '-'}")
         self._update_status_pill()
+        shared_by = task.get("shared_by", "")
+        self.f_from_lbl.configure(text=f"From: {shared_by}" if shared_by else "")
         self._links = [dict(link) for link in task.get("links", [])]
         self._reset_link_entries()
         self._render_links()
@@ -2180,6 +2380,206 @@ class App(tk.Tk):
             self._clear_form()
             self._refresh_views()
             self._status(f"Deleted task '{title}'.")
+
+    # -- sharing with coworkers -------------------------------------------
+    def _ask_name(self):
+        name = simpledialog.askstring(
+            "Your name", "Your name (coworkers see it on tasks you share):",
+            initialvalue=self.settings.get("user_name", ""), parent=self,
+        )
+        name = (name or "").strip()
+        if name:
+            self.settings["user_name"] = name
+            save_settings(self.settings)
+            self._status(f"Your name is set to '{name}'.")
+        return name
+
+    def _share_scope(self):
+        """(project, [task indexes], label) for what's selected, or None."""
+        def folder(project, group):
+            idx = [i for i, t in enumerate(self.store.projects[project])
+                   if not group or t.get("group") == group]
+            return project, idx, group or project
+
+        def one(project, index):
+            return project, [index], self.store.projects[project][index].get("title", "task")
+
+        if self.view == "Buddy":
+            sel = self.b_tree.selection()
+            if sel and sel[0] in self.b_meta:
+                return one(*self.b_meta[sel[0]])
+            if sel and sel[0] in self.b_folder_rows:
+                return folder(*self.b_folder_rows[sel[0]])
+        elif self.view == "Manager":
+            sel = self.tree.selection()
+            meta = self.node_meta.get(sel[0]) if sel else None
+            if meta and meta[0] == "task":
+                return one(meta[1], meta[2])
+            if meta and meta[0] == "group":
+                return folder(meta[1], meta[2])
+            if meta and meta[0] == "project":
+                return folder(meta[1], "")
+        if self.active_project is not None and self.editing_index is not None:
+            return one(self.active_project, self.editing_index)
+        return None
+
+    def _share(self):
+        scope = self._share_scope()
+        if not scope or not scope[1]:
+            self._status("Select a task, subgroup or project to share.")
+            return
+        project, indexes, label = scope
+        name = self.settings.get("user_name") or self._ask_name()
+        if not name:
+            self._status("Set your name first (Settings > Your name).")
+            return
+        # Rank is board order on this machine only; everything else travels.
+        tasks = [{k: v for k, v in self.store.projects[project][i].items() if k != "rank"}
+                 for i in indexes]
+        data = {
+            "format": SHARE_FORMAT,
+            "version": SHARE_VERSION,
+            "from": name,
+            "exported": now_stamp(),
+            "project": project,
+            "lists": {kind: [n for n in self.store.names(project, kind)
+                             if any(t.get(kind) == n for t in tasks)]
+                      for kind in GROUP_KINDS},
+            "tasks": tasks,
+        }
+        default = re.sub(r'[\\/:*?"<>|]+', "-", f"{project} - {label}"
+                         if label != project else project).strip() + ".json"
+        path = filedialog.asksaveasfilename(
+            title="Share tasks", defaultextension=".json", initialfile=default,
+            filetypes=[("Shared tasks", "*.json")],
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        n = len(tasks)
+        self._status(f"Shared {n} task{'s' if n != 1 else ''} to {path} - send that file to a coworker.")
+
+    def _import_shared(self):
+        path = filedialog.askopenfilename(
+            title="Import shared tasks",
+            filetypes=[("Shared tasks or Jira XML", "*.json *.xml"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        if path.lower().endswith(".xml"):
+            self._import_jira(path)
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Import", f"Couldn't read that file:\n{exc}")
+            return
+        if (not isinstance(data, dict) or data.get("format") != SHARE_FORMAT
+                or not isinstance(data.get("tasks"), list)):
+            messagebox.showerror("Import", "That file isn't a shared To-Do task export.")
+            return
+        self._import_data(data)
+
+    def _import_jira(self, path=None):
+        path = path or filedialog.askopenfilename(
+            title="Import Jira XML export",
+            filetypes=[("Jira XML export", "*.xml"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                issues = parse_jira_xml(f.read())
+        except (OSError, ValueError, ET.ParseError) as exc:
+            messagebox.showerror("Import Jira XML", f"Couldn't read that Jira export:\n{exc}")
+            return
+        # Into the selected project; otherwise one named after the Jira project.
+        by_project = {}
+        for jira_project, task in issues:
+            by_project.setdefault(self.active_project or jira_project, []).append(task)
+        # Ask once (not per project) about tickets imported before.
+        dupes = sum(1 for project, tasks in by_project.items() for t in tasks
+                    if t["id"] in {x.get("id") for x in self.store.projects.get(project, [])})
+        replace = bool(dupes) and messagebox.askyesno(
+            "Import Jira XML",
+            f"{dupes} of these Jira issue(s) were imported before.\n\n"
+            f"Replace them with this version?\n(No keeps your copies and skips them.)",
+        )
+        for project, tasks in by_project.items():
+            lists = {kind: sorted({t[kind] for t in tasks if t.get(kind)}) for kind in GROUP_KINDS}
+            self._import_data({"project": project, "from": "Jira", "lists": lists,
+                               "tasks": tasks}, replace=replace)
+        n = len(issues)
+        keys = ", ".join(t["jira_ref"] for _, t in issues[:5] if t["jira_ref"])
+        more = f" (+{n - 5} more)" if n > 5 else ""
+        self._status(f"Imported {n} Jira issue{'s' if n != 1 else ''}: {keys}{more} "
+                     f"into {', '.join(repr(p) for p in by_project)}.")
+
+    def _import_data(self, data, replace=None):
+        """Merge shared/imported tasks into a project. replace=None asks the
+        user what to do with tasks that are already there."""
+        project = str(data.get("project") or "Imported").strip()
+        sender = str(data.get("from") or "a coworker").strip()
+        incoming = [t for t in data["tasks"] if isinstance(t, dict) and t.get("title")]
+        if not incoming:
+            self._status("That file has no tasks in it.")
+            return
+
+        if project not in self.store.projects:
+            self.store.add_project(project)
+        lists = data.get("lists") if isinstance(data.get("lists"), dict) else {}
+        for kind in GROUP_KINDS:
+            names = self.store.groups[kind].setdefault(project, [])
+            for name in lists.get(kind, []):
+                if isinstance(name, str) and name and name not in names:
+                    names.append(name)
+
+        tasks = self.store.projects[project]
+        existing = {t.get("id"): i for i, t in enumerate(tasks) if t.get("id")}
+        dupes = [t for t in incoming if t.get("id") in existing]
+        if replace is None:
+            replace = bool(dupes) and messagebox.askyesno(
+                "Import",
+                f"{len(dupes)} of these task(s) are already in '{project}'.\n\n"
+                f"Replace them with this version?\n"
+                f"(No keeps your copies and skips them.)",
+            )
+
+        known = {key for key, _ in TASK_FIELDS} | {"id"}
+        added = replaced = 0
+        for raw in incoming:
+            task = new_task(str(raw["title"]))
+            task.update({k: v for k, v in raw.items() if k in known})
+            if task.get("status") not in STATUSES:
+                task["status"] = DEFAULT_STATUS
+            if not isinstance(task.get("links"), list):
+                task["links"] = []
+            task["shared_by"] = sender
+            for kind in GROUP_KINDS:
+                names = self.store.groups[kind][project]
+                if task.get(kind) and task[kind] not in names:
+                    names.append(task[kind])
+            if task.get("id") in existing:
+                if not replace:
+                    continue
+                i = existing[task["id"]]
+                task["rank"] = tasks[i].get("rank", 0)
+                tasks[i] = task
+                replaced += 1
+            else:
+                self.store.add_task(project, task)
+                added += 1
+        self.store.save()
+
+        self.active_project, self.editing_index = project, None
+        self._clear_form()
+        self._refresh_views()
+        if self.view == "Buddy":
+            self._refresh_buddy()
+        parts = [f"{added} new"] + ([f"{replaced} updated"] if replaced else [])
+        self._status(f"Imported {' + '.join(parts)} task(s) from {sender} into '{project}'.")
 
     # -- export -----------------------------------------------------------
     def _rows_for_export(self):

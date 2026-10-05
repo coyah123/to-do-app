@@ -80,6 +80,44 @@ each view remembers its own window size/position.
   leaves those tasks unassigned. Shows task and open counts for each.
 - Shortcuts: Ctrl+S save, Ctrl+N new task.
 
+## Sharing tasks with coworkers
+
+1. Set your name once: **Settings → Your name…** (saved in your local
+   `todo-settings.json`).
+2. Select a task, a subgroup or a whole project (in Manager's tree, Buddy,
+   or the task open in the form) and choose **File → Share selected…** (or
+   the **Share…** button in Manager / Buddy's right-click menu). This saves a
+   `.json` file — send it to your coworker.
+3. They choose **File → Import shared tasks…**. The tasks land in the project
+   with the same name (created if needed), with their subgroups, epics,
+   sprints and links, marked **From: (your name)**. From then on they're
+   ordinary tasks they can edit however they like.
+
+Every task carries a hidden ID, so if you send an updated version of
+something they already imported, they're asked whether to replace their
+copy or keep it.
+
+## Importing from Jira
+
+In Jira, open an issue (or a search/filter of issues) and use
+**Export → XML**. Then choose **File → Import Jira XML…** (the regular
+import picker accepts `.xml` too). Each issue becomes a task in the selected
+project — or, if none is selected, a project named after the Jira project:
+
+| Jira | Task |
+|---|---|
+| Summary | Title |
+| Description | Description (HTML converted to plain text) |
+| Status | Status (Done / In Progress / Blocked / Waiting for approval / Not started) |
+| Key + URL | Jira ticket made, Jira ref, and a clickable link |
+| Due / Resolved | Due date / Completed date |
+| Sprint, Epic Link | Sprint, Epic |
+| "is blocked by" links | Blockers |
+| Everything else (type, priority, assignee, reporter, labels, components, versions, story points, dates, subtasks, comments) | Notes |
+
+Imported tasks show **From: Jira**; re-importing the same issue asks
+whether to replace your copy.
+
 ## Data & privacy
 
 - All data lives in **`todo-data.json`** next to the app.
