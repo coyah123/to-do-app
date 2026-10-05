@@ -42,9 +42,25 @@ except ImportError:
     HAVE_OPENPYXL = False
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(APP_DIR, "todo-data.json")
+# Everything personal lives in profile/ (gitignored): tasks, settings and
+# the custom field list. Older versions kept files next to the app; they're
+# moved in on first start (see init_profile).
+PROFILE_DIR = os.path.join(APP_DIR, "profile")
+DATA_FILE = os.path.join(PROFILE_DIR, "data.json")
 # Per-machine window state (last view, window positions, pin).
-SETTINGS_FILE = os.path.join(APP_DIR, "todo-settings.json")
+SETTINGS_FILE = os.path.join(PROFILE_DIR, "settings.json")
+LEGACY_FILES = {
+    DATA_FILE: os.path.join(APP_DIR, "todo-data.json"),
+    SETTINGS_FILE: os.path.join(APP_DIR, "todo-settings.json"),
+}
+
+
+def init_profile():
+    """Create profile/ and move files from older versions into it."""
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    for new, old in LEGACY_FILES.items():
+        if os.path.exists(old) and not os.path.exists(new):
+            os.replace(old, new)
 
 # Status name -> (color, tag). Order here is the workflow order used for
 # sorting and grouping.
@@ -146,7 +162,7 @@ def new_task(title):
     """A task with every field present and defaults filled in."""
     task = {key: "" for key, _ in TASK_FIELDS}
     task.update(title=title, status=DEFAULT_STATUS, added_date=now_stamp(),
-                jira_made=False, links=[], id=uuid.uuid4().hex)
+                jira_made=False, links=[], fields={}, id=uuid.uuid4().hex)
     return task
 
 
@@ -234,6 +250,11 @@ def jira_status(name, category):
     return DEFAULT_STATUS
 
 
+# Jira fields that always get a multi-line box when first created.
+JIRA_LONG_FIELDS = [{"name": "Comments", "type": "long"},
+                    {"name": "Environment", "type": "long"}]
+
+
 def parse_jira_xml(text):
     """Turn a Jira XML export into (jira project name, task dict) pairs."""
     root = ET.fromstring(text)
@@ -287,7 +308,9 @@ def parse_jira_xml(text):
         title = get("summary") or re.sub(r"^\[[^\]]+\]\s*", "", get("title")) or key or "(untitled)"
         link = get("link")
 
-        notes = [f"Imported from Jira {key}".strip()]
+        # Everything without a home in the standard fields becomes a custom
+        # field (created on import if this profile doesn't have it yet).
+        fields = {}
         for label, value in (
             ("Type", get("type")), ("Priority", get("priority")),
             ("Jira status", get("status")), ("Resolution", get("resolution")),
@@ -300,23 +323,21 @@ def parse_jira_xml(text):
             ("Created in Jira", jira_date(get("created"), True)),
             ("Updated in Jira", jira_date(get("updated"), True)),
             ("Parent", get("parent")),
+            ("Subtasks", ", ".join(all_text("subtasks/subtask"))),
         ):
             if value and value.lower() not in ("unresolved", "unassigned", "none"):
-                notes.append(f"{label}: {value}")
+                fields[label] = value
         for name, values in custom.items():
-            if name not in ("Sprint", "Epic Link", "Parent Link", "Rank") and len(", ".join(values)) < 200:
-                notes.append(f"{name}: {', '.join(values)}")
-        subtasks = all_text("subtasks/subtask")
-        if subtasks:
-            notes.append("Subtasks: " + ", ".join(subtasks))
-        comments = item.findall("comments/comment")
+            if name not in ("Sprint", "Epic Link", "Parent Link", "Rank"):
+                fields[name] = ", ".join(values)
+        comments = []
+        for c in item.findall("comments/comment"):
+            who = c.get("author", "")
+            when = jira_date(c.get("created", ""), True)
+            body = html_to_text(c.text or "")
+            comments.append(f"{who} ({when}): {body}" if who or when else body)
         if comments:
-            notes.append("\nComments:")
-            for c in comments:
-                who = c.get("author", "")
-                when = jira_date(c.get("created", ""), True)
-                body = html_to_text(c.text or "")
-                notes.append(f"- {who} ({when}): {body}" if who or when else f"- {body}")
+            fields["Comments"] = "\n\n".join(comments)
 
         task = new_task(title)
         task.update(
@@ -330,7 +351,7 @@ def parse_jira_xml(text):
             jira_made=bool(key),
             jira_ref=key,
             blockers="\n".join(blockers),
-            notes="\n".join(notes),
+            fields=fields,
             links=[{"title": key or "Jira ticket", "description": "Jira ticket",
                     "url": link}] if link else [],
         )
@@ -373,8 +394,13 @@ def save_settings(settings):
 class Store:
     """Holds all projects/tasks and persists them to a local JSON file."""
 
-    def __init__(self, path):
+    def __init__(self, path, fields_path=None):
         self.path = path
+        # Custom field definitions: [{"name", "type": "text"|"long", "source"}].
+        # Created on the fly when an import (e.g. Jira) brings a field we
+        # don't have yet; values live on each task under task["fields"].
+        self.fields_path = fields_path or os.path.join(os.path.dirname(path), "fields.json")
+        self.fields = []
         # {project_name: [task_dict, ...]}
         self.projects = {}
         # {"epic": {project_name: [name, ...]}, "sprint": {...}} - kept in
@@ -395,6 +421,11 @@ class Store:
                     self.groups[kind] = data.get(kind + "s", {})
             else:  # v1 file: the whole file was the projects dict
                 self.projects = data
+        try:
+            with open(self.fields_path, "r", encoding="utf-8") as f:
+                self.fields = [d for d in json.load(f) if isinstance(d, dict) and d.get("name")]
+        except (OSError, ValueError):
+            self.fields = []
         self._migrate()
 
     def _migrate(self):
@@ -406,6 +437,8 @@ class Store:
                 for kind in GROUP_KINDS:
                     task.setdefault(kind, "")
                 task.setdefault("links", [])
+                if not isinstance(task.get("fields"), dict):
+                    task["fields"] = {}
                 if not task.get("id"):  # stable identity for sharing
                     task["id"] = uuid.uuid4().hex
             for task in tasks:
@@ -424,6 +457,24 @@ class Store:
             data[kind + "s"] = self.groups[kind]
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+    def save_fields(self):
+        with open(self.fields_path, "w", encoding="utf-8") as f:
+            json.dump(self.fields, f, indent=2)
+
+    def field_type(self, name):
+        for d in self.fields:
+            if d["name"] == name:
+                return d.get("type", "text")
+        return "text"
+
+    def ensure_field(self, name, ftype="text", source="user"):
+        """Add a custom field definition if it's new. Returns True if added."""
+        if any(d["name"] == name for d in self.fields):
+            return False
+        self.fields.append({"name": name, "type": ftype, "source": source})
+        self.save_fields()
+        return True
 
     def add_project(self, name):
         if name in self.projects:
@@ -1549,7 +1600,13 @@ class App(tk.Tk):
             lst.bind("<<TreeviewSelect>>", lambda e, k=kind: self._on_group_select(k))
             self.g_widgets[kind] = (lst, entry)
 
-    def _build_form(self, form):
+    def _build_form(self, outer):
+        self.form_tabs = ttk.Notebook(outer)
+        self.form_tabs.pack(fill="both", expand=True)
+        form = ttk.Frame(self.form_tabs, padding=(0, 4))
+        fields_tab = ttk.Frame(self.form_tabs, padding=(4, 4))
+        self.form_tabs.add(form, text="Details")
+        self.form_tabs.add(fields_tab, text="Fields")
         pad = {"padx": 4, "pady": 3}
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
@@ -1638,11 +1695,111 @@ class App(tk.Tk):
             side="left", padx=4
         )
 
+        self._build_fields_tab(fields_tab)
         self._added_date = ""
         self._completed_date = ""
         self._update_status_pill()
         self._toggle_jira()
         self._set_form_enabled(False)
+
+    # -- custom fields tab --------------------------------------------------
+    def _build_fields_tab(self, tab):
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        ttk.Label(
+            tab, foreground="#666", font=("", 8), wraplength=320, justify="left",
+            text="Extra fields for this task. Jira imports create these automatically; "
+                 "pick one below or type a new name to add your own.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        bg = ttk.Style(self).lookup("TFrame", "background") or "SystemButtonFace"
+        canvas = tk.Canvas(tab, highlightthickness=0, bg=bg)
+        ys = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
+        canvas.grid(row=1, column=0, sticky="nsew")
+        ys.grid(row=1, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=ys.set)
+        self.f_fields_box = ttk.Frame(canvas)
+        self.f_fields_box.columnconfigure(1, weight=1)
+        win = canvas.create_window(0, 0, window=self.f_fields_box, anchor="nw")
+        self.f_fields_box.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        self.f_fields_canvas = canvas
+
+        add = ttk.Frame(tab)
+        add.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.f_field_pick = ttk.Combobox(add)
+        self.f_field_pick.pack(side="left", fill="x", expand=True)
+        self.f_field_pick.bind("<Return>", lambda e: self._add_field())
+        self.f_field_add_btn = ttk.Button(add, text="Add field", command=self._add_field)
+        self.f_field_add_btn.pack(side="left", padx=(4, 0))
+        self.fields_save_btn = ttk.Button(tab, text="Save  (Ctrl+S)", command=self._save_task)
+        self.fields_save_btn.grid(row=3, column=0, columnspan=2, pady=(8, 2))
+        self._field_widgets = {}
+
+    def _field_value(self, widget):
+        if isinstance(widget, tk.Text):
+            return widget.get("1.0", "end-1c")
+        return widget.get()
+
+    def _current_fields(self):
+        return {name: self._field_value(w) for name, w in self._field_widgets.items()}
+
+    def _collect_fields(self):
+        """Fields to save: the non-empty ones."""
+        return {n: v.strip() for n, v in self._current_fields().items() if v.strip()}
+
+    def _render_fields(self, values):
+        box = self.f_fields_box
+        for w in box.winfo_children():
+            w.destroy()
+        self._field_widgets = {}
+        defined = [d["name"] for d in self.store.fields]
+        names = [n for n in defined if n in values] + [n for n in values if n not in defined]
+        if not names:
+            ttk.Label(box, text="No extra fields on this task.", foreground="#888",
+                      font=("", 8)).grid(row=0, column=0, columnspan=3, sticky="w")
+        for r, name in enumerate(names):
+            ttk.Label(box, text=name, font=("", 8, "bold"), foreground="#444",
+                      wraplength=110, justify="right").grid(
+                row=r, column=0, sticky="ne", padx=(0, 6), pady=2)
+            if self.store.field_type(name) == "long":
+                w = tk.Text(box, height=4, width=26, wrap="word", font=("", 9))
+                w.insert("1.0", values[name])
+            else:
+                w = ttk.Entry(box, width=26)
+                w.insert(0, values[name])
+            w.grid(row=r, column=1, sticky="ew", pady=2)
+            x = ttk.Label(box, text="\u2715", style="LinkAction.TLabel", cursor="hand2")
+            x.grid(row=r, column=2, sticky="n", padx=(4, 0), pady=2)
+            x.bind("<Button-1>", lambda e, n=name: self._remove_field(n))
+            self._field_widgets[name] = w
+        for w in [box, self.f_fields_canvas, *box.winfo_children()]:
+            if not isinstance(w, tk.Text):
+                w.bind("<MouseWheel>", lambda e: self.f_fields_canvas.yview_scroll(
+                    int(-e.delta / 120), "units"))
+        self.f_field_pick.configure(values=[n for n in defined if n not in values])
+        self.form_tabs.tab(1, text=f"Fields ({len(names)})" if names else "Fields")
+        self.f_fields_canvas.yview_moveto(0)
+
+    def _add_field(self):
+        name = self.f_field_pick.get().strip()
+        if not name:
+            self._status("Pick a field or type a new field name, then 'Add field'.")
+            return
+        if self.store.ensure_field(name):
+            self._status(f"Created new field '{name}' - it's now available on every task.")
+        values = self._current_fields()
+        values.setdefault(name, "")
+        self._render_fields(values)
+        self.f_field_pick.set("")
+        self._field_widgets[name].focus_set()
+
+    def _remove_field(self, name):
+        values = self._current_fields()
+        values.pop(name, None)
+        self._render_fields(values)
+        self._status(f"Removed '{name}' from this task - Save to keep the change.")
 
     def _build_links(self, form, r):
         style = ttk.Style(self)
@@ -1788,7 +1945,8 @@ class App(tk.Tk):
         for w in (self.status_cb, self.f_group, self.f_epic, self.f_sprint):
             w.configure(state="readonly" if enabled else "disabled")
         self.jira_chk.state(["!disabled"] if enabled else ["disabled"])
-        for w in (self.f_link_title, self.f_link_desc, self.f_link_url, self.f_link_btn):
+        for w in (self.f_link_title, self.f_link_desc, self.f_link_url, self.f_link_btn,
+                  self.f_field_pick, self.f_field_add_btn, self.fields_save_btn):
             w.state(["!disabled"] if enabled else ["disabled"])
         if enabled:
             self._toggle_jira()
@@ -1837,6 +1995,7 @@ class App(tk.Tk):
         self._update_status_pill()
         shared_by = task.get("shared_by", "")
         self.f_from_lbl.configure(text=f"From: {shared_by}" if shared_by else "")
+        self._render_fields(dict(task.get("fields") or {}))
         self._links = [dict(link) for link in task.get("links", [])]
         self._reset_link_entries()
         self._render_links()
@@ -2352,6 +2511,7 @@ class App(tk.Tk):
             "blockers": self.f_blockers.get("1.0", "end").strip(),
             "notes": self.f_notes.get("1.0", "end").strip(),
             "links": [dict(link) for link in self._links],
+            "fields": self._collect_fields(),
         }
 
         if self.editing_index is None:
@@ -2446,6 +2606,8 @@ class App(tk.Tk):
                              if any(t.get(kind) == n for t in tasks)]
                       for kind in GROUP_KINDS},
             "tasks": tasks,
+            "field_defs": [d for d in self.store.fields
+                           if any(d["name"] in t.get("fields", {}) for t in tasks)],
         }
         default = re.sub(r'[\\/:*?"<>|]+', "-", f"{project} - {label}"
                          if label != project else project).strip() + ".json"
@@ -2510,7 +2672,8 @@ class App(tk.Tk):
         for project, tasks in by_project.items():
             lists = {kind: sorted({t[kind] for t in tasks if t.get(kind)}) for kind in GROUP_KINDS}
             self._import_data({"project": project, "from": "Jira", "lists": lists,
-                               "tasks": tasks}, replace=replace)
+                               "tasks": tasks, "field_defs": JIRA_LONG_FIELDS},
+                              replace=replace)
         n = len(issues)
         keys = ", ".join(t["jira_ref"] for _, t in issues[:5] if t["jira_ref"])
         more = f" (+{n - 5} more)" if n > 5 else ""
@@ -2547,7 +2710,19 @@ class App(tk.Tk):
                 f"(No keeps your copies and skips them.)",
             )
 
-        known = {key for key, _ in TASK_FIELDS} | {"id"}
+        # Create any custom fields this profile doesn't have yet.
+        types = {d.get("name"): d.get("type", "text") for d in data.get("field_defs", [])
+                 if isinstance(d, dict)}
+        for raw in incoming:
+            if not isinstance(raw.get("fields"), dict):
+                raw["fields"] = {}
+            raw["fields"] = {str(k): str(v) for k, v in raw["fields"].items() if str(k).strip()}
+            for name, value in raw["fields"].items():
+                long_value = "\n" in value or len(value) > 80
+                self.store.ensure_field(name, types.get(name) or ("long" if long_value else "text"),
+                                        source=sender)
+
+        known = {key for key, _ in TASK_FIELDS} | {"id", "fields"}
         added = replaced = 0
         for raw in incoming:
             task = new_task(str(raw["title"]))
@@ -2583,7 +2758,8 @@ class App(tk.Tk):
 
     # -- export -----------------------------------------------------------
     def _rows_for_export(self):
-        headers = ["Project"] + [label for _, label in TASK_FIELDS]
+        extra = [d["name"] for d in self.store.fields]
+        headers = ["Project"] + [label for _, label in TASK_FIELDS] + extra
         rows = []
         for project in sorted(self.store.projects, key=str.lower):
             for task in self.store.projects[project]:
@@ -2596,6 +2772,7 @@ class App(tk.Tk):
                     if key == "jira_made":
                         v = "Yes" if v else "No"
                     row.append(v)
+                row += [task.get("fields", {}).get(name, "") for name in extra]
                 rows.append(row)
         return headers, rows
 
@@ -2658,6 +2835,7 @@ class App(tk.Tk):
 
 
 def main():
+    init_profile()
     store = Store(DATA_FILE)
     app = App(store)
     app.mainloop()

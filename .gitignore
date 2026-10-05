@@ -13,3 +13,6 @@ __pycache__/
 
 # Per-machine window state
 todo-settings.json
+
+# Personal profile: tasks, settings, custom fields
+profile/

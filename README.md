@@ -80,10 +80,20 @@ each view remembers its own window size/position.
   leaves those tasks unassigned. Shows task and open counts for each.
 - Shortcuts: Ctrl+S save, Ctrl+N new task.
 
+## Custom fields
+
+Each task has a **Fields** tab next to **Details** for extra data that
+doesn't fit the standard fields — e.g. Priority, Assignee, Story Points.
+Pick an existing field from the box at the bottom (or type a new name) and
+click **Add field**; a new name becomes available on every task. Jira
+imports and shared tasks create any fields you don't have yet, so nothing
+from the source is lost. Custom fields get their own columns in CSV/XLSX
+exports.
+
 ## Sharing tasks with coworkers
 
 1. Set your name once: **Settings → Your name…** (saved in your local
-   `todo-settings.json`).
+   `profile/settings.json`).
 2. Select a task, a subgroup or a whole project (in Manager's tree, Buddy,
    or the task open in the form) and choose **File → Share selected…** (or
    the **Share…** button in Manager / Buddy's right-click menu). This saves a
@@ -113,16 +123,25 @@ project — or, if none is selected, a project named after the Jira project:
 | Due / Resolved | Due date / Completed date |
 | Sprint, Epic Link | Sprint, Epic |
 | "is blocked by" links | Blockers |
-| Everything else (type, priority, assignee, reporter, labels, components, versions, story points, dates, subtasks, comments) | Notes |
+| Everything else (type, priority, assignee, reporter, labels, components, versions, story points, Jira dates, subtasks, comments, any custom field) | **Custom fields** — created automatically if you don't have them yet |
 
 Imported tasks show **From: Jira**; re-importing the same issue asks
 whether to replace your copy.
 
 ## Data & privacy
 
-- All data lives in **`todo-data.json`** next to the app.
-- Window layout is saved per machine in `todo-settings.json`.
-- That file (and any exports) are **gitignored**, so nothing is pushed to GitHub.
+Everything personal lives in the **`profile/`** folder next to the app,
+which is **gitignored** — nothing in it is pushed to GitHub:
+
+| File | What's in it |
+|---|---|
+| `profile/data.json` | Your projects, subgroups, epics, sprints and tasks |
+| `profile/settings.json` | Your name, default view, window positions, filters |
+| `profile/fields.json` | Your custom field list (see "Custom fields") |
+
+Older versions kept `todo-data.json` / `todo-settings.json` next to the
+app; they're moved into `profile/` automatically the first time you run
+this version. Exports (CSV/XLSX) are gitignored too.
 
 ## Exporting for Confluence
 
