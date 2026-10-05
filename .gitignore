@@ -1,0 +1,12 @@
+# Local task data - never commit to GitHub
+todo-data.json
+
+# Exports
+todo-export.csv
+todo-export.xlsx
+*.csv
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
