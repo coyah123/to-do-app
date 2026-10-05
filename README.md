@@ -48,14 +48,17 @@ airgapped work machine. Runs on **Windows, macOS and Linux**.
 |---|---|
 | **Project** | Top-level container. Every task belongs to exactly one project. |
 | **Subgroup** | A folder *inside* a project for related tasks (e.g. an app). Optional. |
-| **Epic / Sprint** | Per-project labels you can group, filter and plan by. Optional. |
+| **Epic** | A body of work inside a project, with its own details (sprint, status, Jira key, description) — see the **Epics** tab. Optional. |
+| **Sprint** | A per-project label you can group, filter and plan by. Optional. |
 | **Task** | The to-do item: title, status, dates, notes, links, custom fields, an attached Jira ticket… |
 | **Status** | Not started (grey) · In Progress (purple) · Blocked (red) · Waiting for approval (orange) · Done (green) |
 | **Priority** | ⇈ Highest · ↑ High · = Medium · ↓ Low · ⇊ Lowest (Jira's levels), or none |
 
 Subgroups, epics and sprints are each a named list per project, managed in
-Manager's **Subgroups, Epics & Sprints** tab. Statuses are color-coded
-everywhere.
+Manager's **Subgroups, Epics & Sprints** tab; epics also have their own
+**Epics** tab. Statuses are color-coded everywhere. Tasks with a Jira ticket
+attached show the **Jira sync icon** (two arrows chasing each other: 🗘 on
+Windows, 🔄 on macOS, ⟳ on Linux) after their title in every view.
 
 ---
 
@@ -103,7 +106,7 @@ top**).
 Three resizable panes:
 
 1. **Left — Projects & Tasks tree.** Projects (📁, bold) contain subgroups
-   (📂, italic) and tasks. The add box at the top creates projects or
+   (📂, italic) and tasks. **Ctrl/Shift-click** to select several tasks. The add box at the top creates projects or
    subgroups depending on what's selected (see
    [Organizing](#organizing-projects-subgroups-epics--sprints)). **Drag
    tasks** to reorganize them. Buttons: **New Task**, **Del Task**,
@@ -118,6 +121,9 @@ Three resizable panes:
      again to reverse). Sorting by Priority puts Highest first, then by
      status and due date; tasks without a priority go last. **Hide Done**. The header also holds **Share… / Import…** and
      **Export CSV / Export XLSX**.
+   - **Epics:** every epic with its project, sprint, status and open/all
+     task counts (filter by project, hide done ones). Click an epic to see
+     and edit its details below — see [Epics](#epics).
    - **Subgroups, Epics & Sprints:** pick a project, then add, rename or
      delete its subgroups, epics and sprints. Each list shows how many tasks
      (and open tasks) use each name. Renaming updates every task using it;
@@ -227,6 +233,9 @@ away. Subgroups can't exist outside a project.
 
 ### Moving tasks (drag and drop in Manager's tree)
 
+Drag one task — or **select several with Ctrl/Shift-click and drag them
+together**:
+
 - Drop on a **subgroup** → the task moves into it.
 - Drop on the **project** row → it leaves its subgroup.
 - Drop on **another task** → it joins that task's subgroup.
@@ -235,7 +244,32 @@ away. Subgroups can't exist outside a project.
 
 The target row is highlighted while you drag.
 
-### Epics and sprints
+### Epics
+
+Manager's **Epics** tab (next to Tasks) treats each epic as something with
+its own details:
+
+- **The list** shows every epic: project, sprint, status (its own, or worked
+  out from its tasks), and open / all tasks. Filter by **Project**, tick
+  **Hide done**, or add one with **New epic** + **+ Epic**.
+- **Click an epic** to edit it below (changes save automatically):
+
+  | Field | |
+  |---|---|
+  | **Name** | Renaming updates every task in the epic |
+  | **Project** | The project the epic belongs to. **Changing it attaches the epic to that project and moves its tasks there too** (you're asked first) — e.g. move a Jira epic out of *Imported* into your project |
+  | **Sprint** | Attach the epic to one of the project's sprints |
+  | **Status** | Set it yourself, or leave "(from its tasks)" |
+  | **Jira** | The epic's Jira key; **Open ↗** opens it. Filled in automatically for epics that came from Jira |
+  | **Description** | Notes about the epic |
+
+- On the right: **the epic's tasks** (click one to open it) and **which
+  sprints** the epic and its tasks are in.
+- **+ New task in this epic** starts a task in the epic's project with the
+  epic (and its sprint) already set. **Delete epic** removes it; its tasks
+  stay, just without an epic.
+
+### Sprints
 
 Add, rename and delete them in **Subgroups, Epics & Sprints**, assign them
 in the task form, and use them to group (Manager table), filter (Buddy,
@@ -362,8 +396,10 @@ your browser. If you typed a full Jira URL into the Jira field yourself
 **File → Import Jira XML…** (the regular **Import…** picker accepts `.xml`
 too) creates one task per issue — a single ticket or a whole search export:
 
-- Tasks go into the **selected project**, or a project named after the
-  Jira project if none is selected.
+- New tasks always go into a project called **Imported**, so your own
+  projects stay tidy. From there, drag them (several at once with
+  Ctrl/Shift-click) into your projects and subgroups, or move a whole Jira
+  epic with its tasks from the **Epics** tab.
 - New tasks get the **title**, plus everything in the table above
   (epic, sprint, description, due date, created date, links); the full
   ticket is attached in the Jira tab.
@@ -397,9 +433,13 @@ Click **Test connection** ("✓ Connected as …"), then **Save**.
   becomes **Refresh from Jira** to pull the latest version.
 - **File → Import from Jira search…:** enter a JQL query (default
   `assignee = currentUser() AND resolution = Unresolved`). Matching tickets
-  become tasks in the selected project; ones you already have are refreshed.
+  become tasks in **Imported**; ones you already have are refreshed wherever
+  you've moved them.
 - **File → Refresh all Jira tickets:** re-fetches every attached ticket in
   one go.
+- **File → Gather Jira imports into 'Imported':** moves every task that a
+  Jira import created back into *Imported* (handy if an import landed in
+  the wrong place). Tasks you attached a ticket to yourself aren't moved.
 
 All "your edits win" rules apply to fetched tickets. Network calls run in
 the background, so the window never freezes; problems (wrong/expired token,
@@ -440,7 +480,7 @@ Paste the result straight into a Confluence page.
 
 | Menu | Items |
 |---|---|
-| **File** | Share selected… · Import shared tasks… · Import Jira XML… · Import from Jira search… · Refresh all Jira tickets |
+| **File** | Share selected… · Import shared tasks… · Import Jira XML… · Import from Jira search… · Refresh all Jira tickets · Gather Jira imports into 'Imported' |
 | **View** | Buddy · Manager · Visual Planner · **Default view** (one option per view) · Buddy always on top |
 | **Settings** | Your name… · Jira connection… |
 
@@ -465,7 +505,7 @@ folder is **gitignored** — nothing in it is ever pushed to GitHub.
 
 | File | What's in it |
 |---|---|
-| `profile/data.json` | Your projects, subgroups, epics, sprints and tasks (incl. links, custom field values and attached Jira tickets) |
+| `profile/data.json` | Your projects, subgroups, epics (and their details), sprints and tasks (incl. links, custom field values and attached Jira tickets) |
 | `profile/settings.json` | Your name, default view, window sizes/positions, Buddy & Planner filters, collapsed folders |
 | `profile/fields.json` | Your custom field list |
 | `profile/jira.json` | Optional Jira connection: address, type, and the token *only* if you chose "Remember" (encrypted on Windows) |

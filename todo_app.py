@@ -193,6 +193,17 @@ BUDDY_SIZE = (300, 440)
 BUDDY_ORDER = ["In Progress", "Blocked", "Waiting for approval", "Not started", "Done"]
 BUDDY_BG = "#fff8c5"  # sticky-note yellow
 ALL_PROJECTS = "All projects"
+# New tasks from Jira imports land here; drag them to your own projects.
+IMPORTED_PROJECT = "Imported"
+# Two arrows chasing each other = synced from Jira. Tk draws the emoji as a
+# tiny box on Windows, so use the plain symbol there (and a safe one on Linux).
+JIRA_ICON = ("\U0001F5D8" if sys.platform == "win32" else
+             "\U0001F504" if sys.platform == "darwin" else "\u27F3")
+
+
+def jira_mark(task):
+    """Suffix shown after a task's title when it has a Jira ticket attached."""
+    return f"  {JIRA_ICON}" if task.get("jira") else ""
 AUTOSAVE_DELAY = 500  # ms after the last keystroke before saving
 ALL_SPRINTS = "All sprints"
 NO_SPRINT = "(no sprint)"
@@ -759,6 +770,9 @@ class Store:
         # {"epic": {project_name: [name, ...]}, "sprint": {...}} - kept in
         # the order they were added (sprints are usually chronological).
         self.groups = {kind: {} for kind in GROUP_KINDS}
+        # Epic details: {project: {epic name: {"sprint", "status",
+        # "description", "jira_key", "jira_url"}}}
+        self.epic_info = {}
         self.load()
 
     def load(self):
@@ -772,6 +786,7 @@ class Store:
                 self.projects = data.get("projects", {})
                 for kind in GROUP_KINDS:
                     self.groups[kind] = data.get(kind + "s", {})
+                self.epic_info = data.get("epic_info", {})
             else:  # v1 file: the whole file was the projects dict
                 self.projects = data
         try:
@@ -809,6 +824,7 @@ class Store:
         data = {"version": 2, "projects": self.projects}
         for kind in GROUP_KINDS:
             data[kind + "s"] = self.groups[kind]
+        data["epic_info"] = self.epic_info
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
@@ -843,6 +859,7 @@ class Store:
         self.projects.pop(name, None)
         for kind in GROUP_KINDS:
             self.groups[kind].pop(name, None)
+        self.epic_info.pop(name, None)
         self.save()
 
     def _next_rank(self):
@@ -896,15 +913,73 @@ class Store:
         for t in self.projects[project]:
             if t.get(kind) == old:
                 t[kind] = new
+        info = self.epic_info.get(project, {})
+        if kind == "epic" and old in info:
+            info[new] = info.pop(old)
         self.save()
         return True
 
     def delete_name(self, project, kind, name):
         self.groups[kind][project].remove(name)
+        if kind == "epic":
+            self.epic_info.get(project, {}).pop(name, None)
         for t in self.projects[project]:
             if t.get(kind) == name:
                 t[kind] = ""
         self.save()
+
+
+    # -- epic details -------------------------------------------------------
+    def epic_meta(self, project, name):
+        return self.epic_info.get(project, {}).get(name, {})
+
+    def set_epic_meta(self, project, name, **fields):
+        self.epic_info.setdefault(project, {}).setdefault(name, {}).update(fields)
+        self.save()
+
+    def move_epic(self, src, name, dst):
+        """Attach an epic to another project, taking its tasks with it.
+        Returns the ids of the tasks that moved."""
+        if src == dst:
+            return []
+        if name in self.groups["epic"].get(src, []):
+            self.groups["epic"][src].remove(name)
+        dst_names = self.groups["epic"].setdefault(dst, [])
+        if name not in dst_names:
+            dst_names.append(name)
+        meta = self.epic_info.get(src, {}).pop(name, {})
+        merged = {**meta, **self.epic_info.get(dst, {}).get(name, {})}
+        if merged:
+            self.epic_info.setdefault(dst, {})[name] = merged
+        moving = [t for t in self.projects.get(src, []) if t.get("epic") == name]
+        self.projects[src] = [t for t in self.projects.get(src, []) if t.get("epic") != name]
+        for t in moving:
+            t["group"] = ""  # subgroups belong to the old project
+            sprints = self.groups["sprint"].setdefault(dst, [])
+            if t.get("sprint") and t["sprint"] not in sprints:
+                sprints.append(t["sprint"])
+        if merged.get("sprint") and merged["sprint"] not in self.groups["sprint"].setdefault(dst, []):
+            self.groups["sprint"][dst].append(merged["sprint"])
+        self.projects.setdefault(dst, []).extend(moving)
+        self.save()
+        return [t.get("id") for t in moving]
+
+    def note_jira_epics(self):
+        """Give epics that came from Jira their key + link automatically."""
+        changed = False
+        for project, tasks in self.projects.items():
+            for t in tasks:
+                j = t.get("jira") or {}
+                epic, url = j.get("epic", ""), j.get("url", "")
+                if (epic and t.get("epic") == epic and "/browse/" in url
+                        and JIRA_KEY_RE.fullmatch(epic)):
+                    meta = self.epic_info.setdefault(project, {}).setdefault(epic, {})
+                    if not meta.get("jira_key"):
+                        meta["jira_key"] = epic
+                        meta["jira_url"] = url.split("/browse/")[0] + "/browse/" + epic
+                        changed = True
+        if changed:
+            self.save()
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1066,8 @@ class App(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Import from Jira search\u2026", command=self._jira_search_import)
         file_menu.add_command(label="Refresh all Jira tickets", command=self._jira_refresh_all)
+        file_menu.add_command(label=f"Gather Jira imports into '{IMPORTED_PROJECT}'",
+                              command=self._gather_imports)
         menubar.add_cascade(label="File", menu=file_menu)
         menubar.add_cascade(label="View", menu=view_menu)
         settings_menu = tk.Menu(menubar, tearoff=False)
@@ -1266,7 +1343,7 @@ class App(tk.Tk):
         tk.Frame(card, bg=color, width=5).pack(side="left", fill="y")
         body = tk.Frame(card, bg=CARD_BG)
         body.pack(side="left", fill="both", expand=True, padx=8, pady=6)
-        tk.Label(body, text=task.get("title") or "(untitled)", bg=CARD_BG,
+        tk.Label(body, text=(task.get("title") or "(untitled)") + jira_mark(task), bg=CARD_BG,
                  font=("", 10), wraplength=LIST_WIDTH - 40, justify="left",
                  anchor="w").pack(fill="x")
 
@@ -1693,7 +1770,7 @@ class App(tk.Tk):
                 links = t.get("links") or []
                 rid = self.b_tree.insert(
                     parents.get(t.get("group"), parents[""]), "end",
-                    text=" " + (t.get("title") or "(untitled)")
+                    text=" " + (t.get("title") or "(untitled)") + jira_mark(t)
                     + (f"  \U0001F517{len(links)}" if links else ""),
                     image=self._buddy_marker(status, t.get("priority", "")), values=(due,),
                     tags=("overdue",) if overdue else (),
@@ -1901,7 +1978,8 @@ class App(tk.Tk):
 
         tree_wrap = ttk.Frame(left)
         tree_wrap.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(tree_wrap, show="tree", selectmode="browse")
+        # extended: Ctrl/Shift-click several tasks, then drag them together
+        self.tree = ttk.Treeview(tree_wrap, show="tree", selectmode="extended")
         self.tree.column("#0", width=220)
         self.tree.pack(side="left", fill="both", expand=True)
         yscroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
@@ -1948,8 +2026,11 @@ class App(tk.Tk):
         self.notebook.pack(fill="both", expand=True, pady=(6, 0))
         tasks_tab = ttk.Frame(self.notebook, padding=4)
         groups_tab = ttk.Frame(self.notebook, padding=4)
+        epics_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(tasks_tab, text="Tasks")
+        self.notebook.add(epics_tab, text="Epics")
         self.notebook.add(groups_tab, text="Subgroups, Epics & Sprints")
+        self._build_epics_tab(epics_tab)
         self._build_groups_tab(groups_tab)
         center = tasks_tab
 
@@ -2301,7 +2382,7 @@ class App(tk.Tk):
             v.insert("end", f"{c.get('author', '')}  {c.get('created', '')}\n", "k")
             v.insert("end", (c.get("body") or "") + "\n\n")
         v.configure(state="disabled")
-        self.form_tabs.tab(2, text=f"Jira \u2713")
+        self.form_tabs.tab(2, text=f"Jira {JIRA_ICON}")
         self._render_quick_links()
 
     def _quick_link_at(self, event):
@@ -2429,10 +2510,12 @@ class App(tk.Tk):
         self._persist_jira(f"Attached Jira {issue['key']}"
                            + (f" - filled in {', '.join(filled)}." if filled else
                               " - nothing new to fill in (your values kept)."))
+        self.store.note_jira_epics()
         if updates:
             self._refresh_tree()
             self._refresh_table()
             self._refresh_groups()
+            self._refresh_epics()
             self._sync_selection()
         return True
 
@@ -2533,11 +2616,43 @@ class App(tk.Tk):
 
         self._run_bg(work, done, f"Refreshing {len(keys)} Jira ticket(s)\u2026")
 
+    def _gather_imports(self):
+        """Move tasks created by Jira imports back into the Imported project."""
+        ids = [t["id"] for p, ts in self.store.projects.items() if p != IMPORTED_PROJECT
+               for t in ts if str(t.get("id", "")).startswith("jira:")]
+        if not ids:
+            self._status("No Jira-imported tasks outside 'Imported'.")
+            return
+        if not messagebox.askyesno(
+                "Gather Jira imports",
+                f"Move {len(ids)} task(s) created by Jira imports into '{IMPORTED_PROJECT}'?\n\n"
+                "This includes any you've already moved to other projects. Tasks you "
+                "attached a ticket to yourself stay where they are."):
+            return
+        if IMPORTED_PROJECT not in self.store.projects:
+            self.store.add_project(IMPORTED_PROJECT)
+        self._move_tasks(ids, IMPORTED_PROJECT, "")
+        self._status(f"Moved {len(ids)} Jira-imported task(s) into '{IMPORTED_PROJECT}'.")
+
+    def _move_tasks(self, ids, dest, group):
+        """Move tasks (by id) into dest / group, keeping the form pointed right."""
+        for task_id in ids:
+            found = self._find_task(task_id)
+            if not found:
+                continue
+            project, index = found
+            task = dict(self.store.projects[project][index])
+            if (project, task.get("group", "")) == (dest, group):
+                continue
+            task["group"] = group
+            self._relocate_task(project, index, task, dest)
+        self._refresh_views()
+
     def _jira_search_import(self):
         client = self._need_jira()
         if not client:
             return
-        where = self.active_project or "a project named after each Jira project"
+        where = f"the '{IMPORTED_PROJECT}' project"
 
         def run(jql):
             if not jql:
@@ -3147,6 +3262,7 @@ class App(tk.Tk):
         self._refresh_tree()
         self._refresh_table()
         self._refresh_groups()
+        self._refresh_epics()
         if self.view == "Visual Planner":
             self._refresh_planner()
         self._sync_selection()
@@ -3181,7 +3297,7 @@ class App(tk.Tk):
                 mark = "✓ " if status == DONE else "● "
                 tid = self.tree.insert(
                     group_nodes.get(task.get("group"), pid), "end",
-                    text=mark + (task.get("title") or "(untitled)"),
+                    text=mark + (task.get("title") or "(untitled)") + jira_mark(task),
                     tags=(STATUSES[status][1],),
                 )
                 self.node_meta[tid] = ("task", project, i)
@@ -3193,9 +3309,18 @@ class App(tk.Tk):
             return
         meta = self.node_meta.get(row)
         self._tdrag = None
+        if event.state & 0x5:  # Shift/Ctrl: let the tree extend the selection
+            return None
         if meta and meta[0] == "task":
-            self._tdrag = {"key": meta[1:], "x": event.x, "y": event.y,
-                           "active": False, "target": None}
+            selected = [r for r in self.tree.selection()
+                        if self.node_meta.get(r, ("",))[0] == "task"]
+            group = selected if row in selected and len(selected) > 1 else [row]
+            ids = [self.store.projects[self.node_meta[r][1]][self.node_meta[r][2]].get("id")
+                   for r in group]
+            self._tdrag = {"key": meta[1:], "ids": ids, "row": row, "x": event.x,
+                           "y": event.y, "active": False, "target": None}
+            if len(group) > 1:
+                return "break"  # keep the multi-selection for dragging
 
     def _tree_mark(self, item, on):
         if item and self.tree.exists(item):
@@ -3224,6 +3349,9 @@ class App(tk.Tk):
 
     def _tree_release(self, event):
         d, self._tdrag = self._tdrag, None
+        if d and not d["active"] and len(d.get("ids", [])) > 1:
+            self.tree.selection_set(d["row"])  # plain click inside a multi-selection
+            return None
         if not d or not d["active"]:
             return None
         self.tree.configure(cursor="")
@@ -3238,6 +3366,11 @@ class App(tk.Tk):
         else:                                  # onto a task: join its group
             dest = meta[1]
             group = self.store.projects[dest][meta[2]].get("group", "")
+        where = f"subgroup '{group}'" if group else "no subgroup"
+        if len(d["ids"]) > 1:
+            self._move_tasks(d["ids"], dest, group)
+            self._status(f"Moved {len(d['ids'])} tasks to {dest} / {where}.")
+            return "break"
         project, index = d["key"]
         task = dict(self.store.projects[project][index])
         if (dest, group) == (project, task.get("group", "")):
@@ -3245,7 +3378,6 @@ class App(tk.Tk):
         task["group"] = group
         self._relocate_task(project, index, task, dest)
         self._refresh_views()
-        where = f"subgroup '{group}'" if group else "no subgroup"
         self._status(f"Moved '{task.get('title', '')}' to {dest} / {where}.")
         return "break"
 
@@ -3342,7 +3474,7 @@ class App(tk.Tk):
                 v = priority_label(v)
             values.append(v)
         rid = self.table.insert(
-            parent, "end", text=task.get("title") or "(untitled)",
+            parent, "end", text=(task.get("title") or "(untitled)") + jira_mark(task),
             values=values, tags=(STATUSES[status][1],),
         )
         self.row_meta[rid] = (project, index)
@@ -3363,7 +3495,9 @@ class App(tk.Tk):
                         node = sel[0]
                 if node is None:
                     node = self._find_project_node(self.active_project)
-            if node:
+            if node and node in self.tree.selection():
+                self.tree.see(node)  # already selected (maybe with others) - keep it
+            elif node:
                 self.tree.selection_set(node)
                 self.tree.see(node)
             else:
@@ -3400,6 +3534,365 @@ class App(tk.Tk):
             if meta[0] == "project" and meta[1] == project:
                 return item
         return None
+
+    # -- Epics tab: epics with their own details --------------------------------
+    def _build_epics_tab(self, tab):
+        top = ttk.Frame(tab)
+        top.pack(fill="x", pady=(0, 4))
+        ttk.Label(top, text="Project").pack(side="left")
+        self.e_filter = ttk.Combobox(top, state="readonly", width=18)
+        self.e_filter.set(ALL_PROJECTS)
+        self.e_filter.pack(side="left", padx=(4, 10))
+        self.e_filter.bind("<<ComboboxSelected>>", lambda e: self._refresh_epics())
+        self.e_hide_done = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Hide done", variable=self.e_hide_done,
+                        command=self._refresh_epics).pack(side="left")
+        self.e_new_name = ttk.Entry(top, width=18)
+        ttk.Button(top, text="+ Epic", command=self._epic_new).pack(side="right")
+        self.e_new_name.pack(side="right", padx=4)
+        self.e_new_name.bind("<Return>", lambda e: self._epic_new())
+        ttk.Label(top, text="New epic").pack(side="right")
+
+        # List on top (full width); details + its tasks side by side below.
+        panes = ttk.Panedwindow(tab, orient="vertical")
+        panes.pack(fill="both", expand=True)
+        left = ttk.Frame(panes)
+        right = ttk.LabelFrame(panes, text="Epic", padding=8)
+        panes.add(left, weight=1)
+        panes.add(right, weight=1)
+
+        self.e_list = ttk.Treeview(left, columns=("project", "sprint", "status", "tasks"),
+                                   selectmode="browse", height=6)
+        for col, text, width in (("#0", "Epic", 170), ("project", "Project", 110),
+                                 ("sprint", "Sprint", 90), ("status", "Status", 100),
+                                 ("tasks", "Open / all", 70)):
+            self.e_list.heading(col, text=text)
+            self.e_list.column(col, width=width, stretch=(col == "#0"))
+        ys = ttk.Scrollbar(left, orient="vertical", command=self.e_list.yview)
+        self.e_list.configure(yscrollcommand=ys.set)
+        ys.pack(side="right", fill="y")
+        self.e_list.pack(fill="both", expand=True)
+        self.e_list.bind("<<TreeviewSelect>>", lambda e: self._on_epic_select())
+        for color, tag in STATUSES.values():
+            self.e_list.tag_configure(tag, foreground=color)
+        self.e_rows = {}   # row id -> (project, epic name)
+        self.e_sel = None  # the epic shown on the right
+
+        right.columnconfigure(1, weight=1)
+        right.columnconfigure(3, weight=1)
+        pad = {"padx": 4, "pady": 3}
+        ttk.Label(right, text="Name").grid(row=0, column=0, sticky="e", **pad)
+        self.e_name = ttk.Entry(right)
+        self.e_name.grid(row=0, column=1, columnspan=2, sticky="ew", **pad)
+        self.e_name.bind("<Return>", lambda e: self._epic_rename())
+        self.e_name.bind("<FocusOut>", lambda e: self._epic_rename())
+        ttk.Label(right, text="Project").grid(row=1, column=0, sticky="e", **pad)
+        self.e_project = ttk.Combobox(right, state="readonly")
+        self.e_project.grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
+        self.e_project.bind("<<ComboboxSelected>>", lambda e: self._epic_move())
+        ttk.Label(right, text="Sprint").grid(row=2, column=0, sticky="e", **pad)
+        self.e_sprint = ttk.Combobox(right, state="readonly")
+        self.e_sprint.grid(row=2, column=1, columnspan=2, sticky="ew", **pad)
+        self.e_sprint.bind("<<ComboboxSelected>>",
+                           lambda e: self._epic_set(sprint=self.e_sprint.get()))
+        ttk.Label(right, text="Status").grid(row=3, column=0, sticky="e", **pad)
+        self.e_status = ttk.Combobox(right, state="readonly",
+                                     values=["(from its tasks)"] + STATUS_ORDER)
+        self.e_status.grid(row=3, column=1, columnspan=2, sticky="ew", **pad)
+        self.e_status.bind("<<ComboboxSelected>>", lambda e: self._epic_set(
+            status="" if self.e_status.current() == 0 else self.e_status.get()))
+        ttk.Label(right, text="Jira").grid(row=4, column=0, sticky="e", **pad)
+        self.e_jira = ttk.Entry(right)
+        self.e_jira.grid(row=4, column=1, sticky="ew", **pad)
+        self.e_jira.bind("<KeyRelease>", lambda e: self._epic_set_later(
+            jira_key=self.e_jira.get().strip()))
+        self.e_jira_open = ttk.Label(right, text="Open \u2197", style="Link.TLabel",
+                                     cursor="hand2")
+        self.e_jira_open.grid(row=4, column=2, **pad)
+        self.e_jira_open.bind("<Button-1>", lambda e: self._epic_open_jira())
+        ttk.Label(right, text="Description").grid(row=5, column=0, sticky="ne", **pad)
+        self.e_desc = tk.Text(right, height=5, width=30, wrap="word", font=("", 9))
+        self.e_desc.grid(row=5, column=1, columnspan=2, sticky="nsew", **pad)
+        self.e_desc.bind("<KeyRelease>", lambda e: self._epic_set_later(
+            description=self.e_desc.get("1.0", "end").strip()))
+        self.e_tasks_lbl = ttk.Label(right, text="Tasks", font=("", 9, "bold"))
+        self.e_tasks_lbl.grid(row=0, column=3, sticky="w", padx=(16, 4))
+        self.e_sprints_lbl = ttk.Label(right, text="", foreground="#666", font=("", 8),
+                                       wraplength=230, justify="left")
+        self.e_sprints_lbl.grid(row=1, column=3, sticky="w", padx=(16, 4))
+        self.e_tasks = ttk.Treeview(right, show="tree", height=6, selectmode="browse")
+        self.e_tasks.grid(row=2, column=3, rowspan=4, sticky="nsew", padx=(16, 4), pady=3)
+        right.rowconfigure(5, weight=1)
+        for color, tag in STATUSES.values():
+            self.e_tasks.tag_configure(tag, foreground=color)
+        self.e_tasks.bind("<<TreeviewSelect>>", lambda e: self._epic_open_task())
+        self.e_task_rows = {}
+        btns = ttk.Frame(right)
+        btns.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self.e_newtask_btn = ttk.Button(btns, text="+ New task in this epic",
+                                        command=self._epic_new_task)
+        self.e_newtask_btn.pack(side="left")
+        self.e_delete_btn = ttk.Button(btns, text="Delete epic", command=self._epic_delete)
+        self.e_delete_btn.pack(side="right")
+        self._epic_job = None
+        self._epic_pending = {}
+        self._load_epic(None)
+
+    def _epic_status(self, project, name):
+        """The epic's own status, or one worked out from its tasks."""
+        meta = self.store.epic_meta(project, name)
+        if meta.get("status") in STATUSES:
+            return meta["status"]
+        tasks = [t for t in self.store.projects.get(project, []) if t.get("epic") == name]
+        states = {t.get("status") for t in tasks}
+        if tasks and states == {DONE}:
+            return DONE
+        if states & {"In Progress", "Blocked", "Waiting for approval", DONE}:
+            return "In Progress"
+        return DEFAULT_STATUS
+
+    def _refresh_epics(self):
+        projects = sorted(self.store.projects, key=str.lower)
+        self.e_filter.configure(values=[ALL_PROJECTS] + projects)
+        if self.e_filter.get() not in projects:
+            self.e_filter.set(ALL_PROJECTS)
+        chosen = self.e_filter.get()
+        scope = projects if chosen == ALL_PROJECTS else [chosen]
+        self.e_list.delete(*self.e_list.get_children())
+        self.e_rows = {}
+        reselect = None
+        for project in scope:
+            for name in self.store.names(project, "epic"):
+                status = self._epic_status(project, name)
+                if self.e_hide_done.get() and status == DONE:
+                    continue
+                meta = self.store.epic_meta(project, name)
+                tasks = [t for t in self.store.projects[project] if t.get("epic") == name]
+                open_n = sum(1 for t in tasks if t.get("status") != DONE)
+                rid = self.e_list.insert(
+                    "", "end", text=name + (f"  {JIRA_ICON}" if meta.get("jira_key") else ""),
+                    values=(project, meta.get("sprint", ""), "\u25cf " + status,
+                            f"{open_n} / {len(tasks)}"),
+                    tags=(STATUSES[status][1],))
+                self.e_rows[rid] = (project, name)
+                if (project, name) == self.e_sel:
+                    reselect = rid
+        if reselect:
+            self.e_list.selection_set(reselect)
+        if self.e_sel and not reselect:
+            self._load_epic(None)
+        elif self.e_sel:
+            self._load_epic_tasks()
+
+    def _on_epic_select(self):
+        sel = self.e_list.selection()
+        key = self.e_rows.get(sel[0]) if sel else None
+        if key and key != self.e_sel:
+            self._flush_epic()
+            self._load_epic(key)
+
+    def _load_epic(self, key):
+        """Show an epic's details on the right (None = nothing selected)."""
+        self.e_sel = key
+        widgets = (self.e_name, self.e_jira)
+        for w in widgets:
+            w.configure(state="normal")
+            w.delete(0, "end")
+        self.e_desc.configure(state="normal")
+        self.e_desc.delete("1.0", "end")
+        self.e_project.set("")
+        self.e_sprint.set("")
+        self.e_status.set("")
+        enabled = key is not None
+        if enabled:
+            project, name = key
+            meta = self.store.epic_meta(project, name)
+            self.e_name.insert(0, name)
+            self.e_project.configure(values=sorted(self.store.projects, key=str.lower))
+            self.e_project.set(project)
+            self.e_sprint.configure(values=[""] + self.store.names(project, "sprint"))
+            self.e_sprint.set(meta.get("sprint", ""))
+            self.e_status.set(meta.get("status") or "(from its tasks)")
+            self.e_jira.insert(0, meta.get("jira_key", ""))
+            self.e_desc.insert("1.0", meta.get("description", ""))
+        for w in (self.e_name, self.e_jira):
+            w.configure(state="normal" if enabled else "disabled")
+        self.e_desc.configure(state="normal" if enabled else "disabled")
+        for w in (self.e_project, self.e_sprint, self.e_status):
+            w.configure(state="readonly" if enabled else "disabled")
+        for w in (self.e_newtask_btn, self.e_delete_btn):
+            w.state(["!disabled"] if enabled else ["disabled"])
+        self._load_epic_tasks()
+
+    def _load_epic_tasks(self):
+        self.e_tasks.delete(*self.e_tasks.get_children())
+        self.e_task_rows = {}
+        if not self.e_sel:
+            self.e_tasks_lbl.configure(text="Select an epic on the left.")
+            self.e_sprints_lbl.configure(text="")
+            return
+        project, name = self.e_sel
+        tasks = [(i, t) for i, t in enumerate(self.store.projects.get(project, []))
+                 if t.get("epic") == name]
+        self.e_tasks_lbl.configure(text=f"Tasks in this epic ({len(tasks)})")
+        sprints = sorted({t.get("sprint") for _, t in tasks if t.get("sprint")}, key=str.lower)
+        own = self.store.epic_meta(project, name).get("sprint", "")
+        parts = [f"Epic sprint: {own}" if own else "Epic not attached to a sprint"]
+        parts.append("Its tasks are in: " + (", ".join(sprints) if sprints else "no sprint"))
+        self.e_sprints_lbl.configure(text="  \u00b7  ".join(parts))
+        tasks.sort(key=lambda it: (STATUS_ORDER.index(it[1].get("status", DEFAULT_STATUS)),
+                                   priority_rank(it[1])))
+        for i, t in tasks:
+            status = t.get("status", DEFAULT_STATUS)
+            rid = self.e_tasks.insert("", "end", text=("\u2713 " if status == DONE else "\u25cf ")
+                                      + (t.get("title") or "(untitled)") + jira_mark(t),
+                                      tags=(STATUSES[status][1],))
+            self.e_task_rows[rid] = (project, i)
+
+    def _epic_set(self, **fields):
+        if self.e_sel:
+            self.store.set_epic_meta(*self.e_sel, **fields)
+            self._refresh_epics()
+            self._status(f"Saved epic '{self.e_sel[1]}'.")
+
+    def _epic_set_later(self, **fields):
+        """Typing in epic fields: save shortly after you pause."""
+        self._epic_pending.update(fields)
+        if self._epic_job:
+            self.after_cancel(self._epic_job)
+        self._epic_job = self.after(AUTOSAVE_DELAY, self._flush_epic)
+
+    def _flush_epic(self):
+        if self._epic_job:
+            self.after_cancel(self._epic_job)
+            self._epic_job = None
+        if self._epic_pending and self.e_sel:
+            self.store.set_epic_meta(*self.e_sel, **self._epic_pending)
+            self._status(f"Saved epic '{self.e_sel[1]}'.")
+            self._refresh_epics()
+        self._epic_pending = {}
+
+    def _epic_rename(self):
+        if not self.e_sel:
+            return
+        project, old = self.e_sel
+        new = self.e_name.get().strip()
+        if not new or new == old:
+            return
+        self._flush_epic()
+        if not self.store.rename_name(project, "epic", old, new):
+            self._status(f"An epic called '{new}' already exists in '{project}'.")
+            return
+        self.e_sel = (project, new)
+        self._refresh_choices()
+        if self.active_project == project and self.f_epic.get() == old:
+            self.f_epic.set(new)
+        self._refresh_views()
+        self._status(f"Renamed epic '{old}' to '{new}'.")
+
+    def _epic_move(self):
+        """Attach the epic to another project (its tasks come along)."""
+        if not self.e_sel:
+            return
+        src, name = self.e_sel
+        dst = self.e_project.get()
+        if not dst or dst == src:
+            return
+        n = self.store.usage(src, "epic", name)
+        if not messagebox.askyesno(
+                "Attach epic to project",
+                f"Attach epic '{name}' to '{dst}'?" +
+                (f"\n\nIts {n} task(s) in '{src}' move to '{dst}' too." if n else "")):
+            self.e_project.set(src)
+            return
+        self._flush_epic()
+        editing_id = None
+        if self.active_project is not None and self.editing_index is not None:
+            editing_id = self.store.projects[self.active_project][self.editing_index].get("id")
+        self._flush_autosave()
+        self.store.move_epic(src, name, dst)
+        if editing_id:  # keep the form pointed at the same task
+            found = self._find_task(editing_id)
+            if found:
+                self.active_project, self.editing_index = found
+        self.e_sel = (dst, name)
+        self._refresh_choices()
+        self._refresh_views()
+        self._load_epic(self.e_sel)
+        self._status(f"Epic '{name}' is now in '{dst}'" + (f" with its {n} task(s)." if n else "."))
+
+    def _epic_new(self):
+        name = self.e_new_name.get().strip()
+        project = (self.e_filter.get() if self.e_filter.get() != ALL_PROJECTS
+                   else (self.e_sel[0] if self.e_sel else self.active_project))
+        if not project:
+            self._status("Pick a project (top left) to add the epic to.")
+            return
+        if not name:
+            self._status("Type a name for the new epic.")
+            self.e_new_name.focus_set()
+            return
+        if not self.store.add_name(project, "epic", name):
+            self._status(f"Epic '{name}' already exists in '{project}'.")
+            return
+        self.e_new_name.delete(0, "end")
+        self.e_sel = (project, name)
+        self._refresh_choices()
+        self._refresh_views()
+        self._load_epic(self.e_sel)
+        self._status(f"Added epic '{name}' to '{project}'.")
+
+    def _epic_delete(self):
+        if not self.e_sel:
+            return
+        project, name = self.e_sel
+        n = self.store.usage(project, "epic", name)
+        if not messagebox.askyesno(
+                "Delete epic", f"Delete epic '{name}'?" +
+                (f"\n\nIts {n} task(s) stay, just without an epic." if n else "")):
+            return
+        self._epic_pending = {}
+        self.store.delete_name(project, "epic", name)
+        if self.active_project == project and self.f_epic.get() == name:
+            self.f_epic.set("")
+        self.e_sel = None
+        self._refresh_choices()
+        self._refresh_views()
+        self._load_epic(None)
+        self._status(f"Deleted epic '{name}'.")
+
+    def _epic_new_task(self):
+        if not self.e_sel:
+            return
+        project, name = self.e_sel
+        sprint = self.store.epic_meta(project, name).get("sprint", "")
+        self.notebook.select(0)
+        self._select_project(project)
+        self.f_epic.set(name)
+        if sprint:
+            self.f_sprint.set(sprint)
+        self.f_title.focus_set()
+        self._status(f"New task in epic '{name}' - type a title (it saves automatically).")
+
+    def _epic_open_task(self):
+        sel = self.e_tasks.selection()
+        if sel and sel[0] in self.e_task_rows:
+            project, index = self.e_task_rows[sel[0]]
+            self._select_task(project, index)
+
+    def _epic_open_jira(self):
+        if not self.e_sel:
+            return
+        meta = self.store.epic_meta(*self.e_sel)
+        key = self.e_jira.get().strip()
+        url = meta.get("jira_url") if meta.get("jira_key") == key else ""
+        if not url and key:
+            base = load_jira_config().get("base_url", "")
+            url = f"{base}/browse/{key}" if base else ""
+        if url:
+            self._open_link(url)
+        else:
+            self._status("No Jira link for this epic - set a Jira key (and connect Jira).")
 
     # -- epics & sprints tab ----------------------------------------------
     def _refresh_groups(self):
@@ -3515,6 +4008,11 @@ class App(tk.Tk):
         sel = self.tree.selection()
         meta = self.node_meta.get(sel[0]) if sel else None
         if not meta:
+            return
+        tasks = [r for r in sel if self.node_meta.get(r, ("",))[0] == "task"]
+        if len(tasks) > 1:  # multi-select: leave the form alone, offer the drag
+            self._status(f"{len(tasks)} tasks selected - drag them onto a project or "
+                         "subgroup to move them together.")
             return
         if meta[0] == "project":
             self._select_project(meta[1])
@@ -3886,8 +4384,7 @@ class App(tk.Tk):
                 task["jira"] = issue
                 refreshed.append(issue["key"])
             elif create:
-                by_project.setdefault(self.active_project or issue["project"], []).append(
-                    jira_task(issue))
+                by_project.setdefault(IMPORTED_PROJECT, []).append(jira_task(issue))
         if refreshed:
             self.store.save()
         for project, tasks in by_project.items():
@@ -3906,7 +4403,11 @@ class App(tk.Tk):
         if refreshed:
             parts.append("refreshed the Jira copy on " + ", ".join(refreshed[:5])
                          + (f" (+{len(refreshed) - 5} more)" if len(refreshed) > 5 else ""))
-        self._status("Jira import: " + "; ".join(parts) + ".")
+        self.store.note_jira_epics()
+        self._refresh_epics()
+        if by_project:
+            parts.append("drag them from 'Imported' into your projects")
+        self._status("Jira import: " + ("; ".join(parts) or "nothing new") + ".")
 
     def _import_data(self, data, replace=None):
         """Merge shared/imported tasks into a project. replace=None asks the
