@@ -16,13 +16,19 @@ The only OS dialog used is the native file picker for exports.
 Runs on Windows, macOS, and Linux.
 """
 
+import base64
 import csv
 import html
 import json
 import os
 import re
+import ssl
 import sys
+import threading
 import tkinter as tk
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 import webbrowser
 import xml.etree.ElementTree as ET
@@ -50,6 +56,8 @@ PROFILE_DIR = os.path.join(APP_DIR, "profile")
 DATA_FILE = os.path.join(PROFILE_DIR, "data.json")
 # Per-machine window state (last view, window positions, pin).
 SETTINGS_FILE = os.path.join(PROFILE_DIR, "settings.json")
+# Optional Jira connection (address, auth type, token if remembered).
+JIRA_FILE = os.path.join(PROFILE_DIR, "jira.json")
 LEGACY_FILES = {
     DATA_FILE: os.path.join(APP_DIR, "todo-data.json"),
     SETTINGS_FILE: os.path.join(APP_DIR, "todo-settings.json"),
@@ -566,6 +574,146 @@ def make_marker(master, status_color, priority):
     return img
 
 
+# ---------------------------------------------------------------------------
+# Optional Jira connection (read-only). Fetches the same XML you'd get from
+# Jira's "Export > XML", so it reuses parse_jira_issues. Supports Jira Server
+# / Data Center personal access tokens (Bearer) and Jira Cloud (email + API
+# token). Settings live in profile/jira.json (gitignored).
+# ---------------------------------------------------------------------------
+JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
+
+
+def _dpapi(data, protect):
+    """Windows: encrypt/decrypt bytes with the current user's login (DPAPI)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = Blob()
+    crypt = ctypes.windll.crypt32
+    fn = crypt.CryptProtectData if protect else crypt.CryptUnprotectData
+    if not fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
+        raise OSError("Windows couldn't " + ("protect" if protect else "unlock") + " the token")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def protect_token(token):
+    if sys.platform == "win32":
+        return "dpapi:" + base64.b64encode(_dpapi(token.encode("utf-8"), True)).decode("ascii")
+    return "plain:" + token  # file is chmod 600 (owner-only) on macOS/Linux
+
+
+def unprotect_token(stored):
+    if not stored:
+        return ""
+    kind, _, value = stored.partition(":")
+    if kind == "dpapi":
+        return _dpapi(base64.b64decode(value), False).decode("utf-8")
+    return value if kind == "plain" else ""
+
+
+def load_jira_config():
+    try:
+        with open(JIRA_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_jira_config(cfg):
+    os.makedirs(os.path.dirname(JIRA_FILE), exist_ok=True)
+    with open(JIRA_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    if sys.platform != "win32":
+        try:
+            os.chmod(JIRA_FILE, 0o600)
+        except OSError:
+            pass
+
+
+def jira_base_url(text):
+    """Clean up whatever was typed: add https://, drop /browse/... and slashes."""
+    url = normalize_url(text.strip()) if text.strip() else ""
+    url = re.split(r"/(?:browse|secure|projects|issues|rest|si|sr)/", url, maxsplit=1)[0]
+    return url.rstrip("/")
+
+
+class JiraError(Exception):
+    pass
+
+
+class JiraClient:
+    """Minimal read-only Jira client (standard library only)."""
+
+    def __init__(self, base_url, auth, token, email="", ca_file="", timeout=20):
+        self.base = jira_base_url(base_url)
+        self.auth, self.token, self.email = auth, token, email
+        self.ca_file, self.timeout = ca_file, timeout
+
+    def _request(self, path, accept="application/xml"):
+        if not self.base:
+            raise JiraError("No Jira address set (Settings > Jira connection).")
+        if not self.token:
+            raise JiraError("No Jira token - enter it in Settings > Jira connection.")
+        req = urllib.request.Request(self.base + path, headers={
+            "Accept": accept, "User-Agent": "todo-tracker",
+            "Authorization": (f"Bearer {self.token}" if self.auth == "pat" else
+                              "Basic " + base64.b64encode(
+                                  f"{self.email}:{self.token}".encode()).decode()),
+        })
+        ctx = ssl.create_default_context(cafile=self.ca_file or None)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout, context=ctx) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            hints = {
+                401: "Jira rejected the token (401). Check it's correct and not expired.",
+                403: "Jira refused access (403). Your token may lack permission, or "
+                     "XML export may be disabled on this Jira.",
+                404: "Not found (404). Check the ticket key and the Jira address.",
+            }
+            raise JiraError(hints.get(exc.code, f"Jira returned HTTP {exc.code}.")) from None
+        except ssl.SSLError as exc:
+            raise JiraError("SSL certificate problem talking to Jira. If your company "
+                            "uses its own certificates, set the CA file in Settings > "
+                            f"Jira connection. ({exc.reason or exc})") from None
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, ssl.SSLError):
+                raise JiraError("SSL certificate problem talking to Jira. If your company "
+                                "uses its own certificates, set the CA file in Settings > "
+                                "Jira connection.") from None
+            raise JiraError(f"Couldn't reach Jira at {self.base} ({reason}).") from None
+        except (TimeoutError, OSError) as exc:
+            raise JiraError(f"Couldn't reach Jira at {self.base} ({exc}).") from None
+        head = body.lstrip()[:200].lower()
+        if accept.endswith("xml") and (head.startswith("<!doctype html") or "<html" in head):
+            raise JiraError("Jira sent back a web page instead of data - usually a "
+                            "login/SSO page, meaning the token wasn't accepted.")
+        return body
+
+    def myself(self):
+        """Who the token belongs to - used by 'Test connection'."""
+        data = json.loads(self._request("/rest/api/2/myself", accept="application/json"))
+        return data.get("displayName") or data.get("name") or data.get("emailAddress") or "?"
+
+    def issue_xml(self, key):
+        key = urllib.parse.quote(key)
+        return self._request(f"/si/jira.issueviews:issue-xml/{key}/{key}.xml")
+
+    def search_xml(self, jql, limit=200):
+        q = urllib.parse.urlencode({"jqlQuery": jql, "tempMax": limit})
+        return self._request(f"/sr/jira.issueviews:searchrequest-xml/temp/SearchRequest.xml?{q}")
+
+
 def set_status(task, status):
     """Change status, stamping/clearing the completed date to match."""
     task["status"] = status
@@ -840,10 +988,14 @@ class App(tk.Tk):
         file_menu.add_command(label="Share selected\u2026", command=self._share)
         file_menu.add_command(label="Import shared tasks\u2026", command=self._import_shared)
         file_menu.add_command(label="Import Jira XML\u2026", command=self._import_jira)
+        file_menu.add_separator()
+        file_menu.add_command(label="Import from Jira search\u2026", command=self._jira_search_import)
+        file_menu.add_command(label="Refresh all Jira tickets", command=self._jira_refresh_all)
         menubar.add_cascade(label="File", menu=file_menu)
         menubar.add_cascade(label="View", menu=view_menu)
         settings_menu = tk.Menu(menubar, tearoff=False)
         settings_menu.add_command(label="Your name\u2026", command=lambda: self._ask_name())
+        settings_menu.add_command(label="Jira connection\u2026", command=self._jira_settings)
         menubar.add_cascade(label="Settings", menu=settings_menu)
         self.config(menu=menubar)
 
@@ -2065,8 +2217,19 @@ class App(tk.Tk):
             self.j_view.tag_bind(tag, "<Enter>", lambda e: self.j_view.configure(cursor="hand2"))
             self.j_view.tag_bind(tag, "<Leave>", lambda e: self.j_view.configure(cursor=""))
 
-        paste = ttk.LabelFrame(tab, text=f"Paste Jira XML ({MOD_LABEL}+Enter to attach)", padding=4)
-        paste.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        fetch = ttk.Frame(tab)
+        fetch.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(fetch, text="Ticket").pack(side="left")
+        self.j_fetch_key = ttk.Entry(fetch, width=16)
+        self.j_fetch_key.pack(side="left", padx=4, fill="x", expand=True)
+        self.j_fetch_key.bind("<Return>", lambda e: self._jira_fetch())
+        self.j_fetch_btn = ttk.Button(fetch, text="Fetch from Jira", command=self._jira_fetch)
+        self.j_fetch_btn.pack(side="left")
+        self.j_fetch_hint = ttk.Label(tab, text="", foreground="#888", font=("", 8))
+        self.j_fetch_hint.grid(row=3, column=0, sticky="w")
+
+        paste = ttk.LabelFrame(tab, text=f"Or paste Jira XML ({MOD_LABEL}+Enter to attach)", padding=4)
+        paste.grid(row=4, column=0, sticky="ew", pady=(4, 0))
         paste.columnconfigure(0, weight=1)
         self.j_paste = tk.Text(paste, height=3, width=40, wrap="none", font="TkFixedFont")
         self.j_paste.grid(row=0, column=0, columnspan=4, sticky="ew")
@@ -2078,8 +2241,21 @@ class App(tk.Tk):
         self.j_remove_btn = ttk.Button(paste, text="Remove", command=self._jira_remove)
         self.j_remove_btn.grid(row=1, column=3, padx=(4, 0), pady=(4, 0))
         self._jira = None
+        self._jira_token = ""  # this session's token (if not remembered)
 
     def _render_jira(self):
+        # Fetch bar: pre-fill this task's ticket key; hint if not connected.
+        key = (self._jira or {}).get("key") or (
+            self.f_jira_ref.get().strip() if self.f_jira_made.get() else "")
+        m = JIRA_KEY_RE.search(key.upper()) if key else None
+        self.j_fetch_key.delete(0, "end")
+        if m:
+            self.j_fetch_key.insert(0, m.group(1))
+        cfg = load_jira_config()
+        self.j_fetch_btn.configure(text="Refresh from Jira" if self._jira else "Fetch from Jira")
+        self.j_fetch_hint.configure(
+            text="" if cfg.get("base_url") else
+            "Connect Jira under Settings \u2192 Jira connection to fetch tickets directly.")
         v, j = self.j_view, self._jira
         v.configure(state="normal")
         v.delete("1.0", "end")
@@ -2259,6 +2435,240 @@ class App(tk.Tk):
             self._refresh_groups()
             self._sync_selection()
         return True
+
+    # -- Jira connection -------------------------------------------------------
+    def _jira_client(self):
+        cfg = load_jira_config()
+        token = self._jira_token
+        if not token and cfg.get("token"):
+            try:
+                token = self._jira_token = unprotect_token(cfg["token"])
+            except OSError:
+                token = ""
+        if not cfg.get("base_url") or not token:
+            return None
+        return JiraClient(cfg["base_url"], cfg.get("auth", "pat"), token,
+                          cfg.get("email", ""), cfg.get("ca_file", ""))
+
+    def _run_bg(self, work, done, busy_msg):
+        """Run a network call off the UI thread; deliver the result on it."""
+        self._status(busy_msg)
+        self.configure(cursor="watch")
+        box = {}
+
+        def worker():
+            try:
+                box["result"] = work()
+            except JiraError as exc:
+                box["error"] = str(exc)
+            except Exception as exc:  # noqa: BLE001 - report anything to the user
+                box["error"] = f"Unexpected error: {exc}"
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        def poll():
+            if thread.is_alive():
+                self.after(100, poll)
+                return
+            self.configure(cursor="")
+            if "error" in box:
+                self._status(box["error"])
+                messagebox.showerror("Jira", box["error"])
+            else:
+                done(box["result"])
+
+        self.after(100, poll)
+
+    def _need_jira(self):
+        client = self._jira_client()
+        if client is None:
+            self._status("Set up the Jira connection first (Settings > Jira connection).")
+            self._jira_settings()
+        return client
+
+    def _jira_fetch(self):
+        """Fetch (or refresh) a ticket by key/URL and attach it to this task."""
+        if not self.active_project or self.save_btn.instate(["disabled"]):
+            self._status("Open a task first.")
+            return
+        m = JIRA_KEY_RE.search(self.j_fetch_key.get().strip().upper())
+        if not m:
+            self._status("Type a ticket key like MDA-12 (or paste its URL).")
+            self.j_fetch_key.focus_set()
+            return
+        client = self._need_jira()
+        if not client:
+            return
+        key = m.group(1)
+        target = (self.active_project, self.editing_index)
+
+        def done(xml_text):
+            if (self.active_project, self.editing_index) != target:
+                self._status(f"Fetched {key}, but you'd moved to another task - not attached.")
+                return
+            self._jira_attach(xml_text)
+
+        self._run_bg(lambda: client.issue_xml(key), done, f"Fetching {key} from Jira\u2026")
+
+    def _jira_refresh_all(self):
+        keys = sorted({(t.get("jira") or {}).get("key") for ts in self.store.projects.values()
+                       for t in ts if (t.get("jira") or {}).get("key")})
+        if not keys:
+            self._status("No tasks have a Jira ticket attached yet.")
+            return
+        client = self._need_jira()
+        if not client:
+            return
+
+        def work():
+            parts = []
+            for i in range(0, len(keys), 50):  # keep the query a sane length
+                parts.append(client.search_xml(f"key in ({', '.join(keys[i:i + 50])})"))
+            return parts
+
+        def done(parts):
+            for xml_text in parts:
+                self._import_jira_text(xml_text, create=False)
+
+        self._run_bg(work, done, f"Refreshing {len(keys)} Jira ticket(s)\u2026")
+
+    def _jira_search_import(self):
+        client = self._need_jira()
+        if not client:
+            return
+        where = self.active_project or "a project named after each Jira project"
+
+        def run(jql):
+            if not jql:
+                return
+            self.settings["jira_last_jql"] = jql
+            save_settings(self.settings)
+            self._run_bg(lambda: client.search_xml(jql),
+                         lambda xml_text: self._import_jira_text(xml_text),
+                         "Searching Jira\u2026")
+
+        self._prompt("Import from Jira search",
+                     f"JQL query. Matching tickets become tasks in {where}; ones you "
+                     "already have are just refreshed.",
+                     self.settings.get("jira_last_jql",
+                                       "assignee = currentUser() AND resolution = Unresolved"),
+                     run)
+
+    def _jira_settings(self):
+        """In-app panel for the optional Jira connection."""
+        self._close_prompt()
+        cfg = load_jira_config()
+        bg = "#ffffff"
+        panel = self._prompt_panel = tk.Frame(self, bg=bg, highlightthickness=2,
+                                              highlightbackground=ACCENT, padx=14, pady=12)
+        tk.Label(panel, text="Jira connection (optional)", bg=bg,
+                 font=("", 11, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        tk.Label(panel, bg=bg, fg="#555", wraplength=320, justify="left",
+                 text="Read-only: fetches tickets the same way as Export \u2192 XML. "
+                      "Saved in profile/jira.json (not in git).").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
+
+        auth = tk.StringVar(value=cfg.get("auth", "pat"))
+        remember = tk.BooleanVar(value=bool(cfg.get("token")))
+        rows = {}
+
+        def row(r, label, widget):
+            tk.Label(panel, text=label, bg=bg).grid(row=r, column=0, sticky="w", pady=2)
+            widget.grid(row=r, column=1, columnspan=2, sticky="ew", pady=2)
+            rows[label] = widget
+            return widget
+
+        base = row(2, "Jira address", ttk.Entry(panel, width=36))
+        base.insert(0, cfg.get("base_url", ""))
+        kind = tk.Frame(panel, bg=bg)
+        for text, value in (("Server / Data Center (personal access token)", "pat"),
+                            ("Cloud (email + API token)", "cloud")):
+            tk.Radiobutton(kind, text=text, variable=auth, value=value, bg=bg,
+                           activebackground=bg, anchor="w",
+                           command=lambda: toggle_email()).pack(anchor="w")
+        row(3, "Type", kind)
+        email = row(4, "Email (Cloud)", ttk.Entry(panel, width=36))
+        email.insert(0, cfg.get("email", ""))
+        token = row(5, "Token", ttk.Entry(panel, width=36, show="\u2022"))
+        token.insert(0, self._jira_token)
+        if cfg.get("token") and not self._jira_token:
+            tk.Label(panel, text="(saved - leave blank to keep)", bg=bg,
+                     fg="#888", font=("", 8)).grid(row=6, column=1, sticky="w")
+        tk.Checkbutton(panel, text="Remember token on this computer" +
+                       (" (encrypted with your Windows login)" if sys.platform == "win32"
+                        else " (file readable only by you)"),
+                       variable=remember, bg=bg, activebackground=bg).grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ca = row(8, "CA file (optional)", ttk.Entry(panel, width=30))
+        ca.insert(0, cfg.get("ca_file", ""))
+        ttk.Button(panel, text="Browse\u2026", command=lambda: (
+            lambda f: f and (ca.delete(0, "end"), ca.insert(0, f)))(
+            filedialog.askopenfilename(title="Company CA certificate",
+                                       filetypes=[("Certificates", "*.pem *.crt *.cer"),
+                                                  ("All files", "*.*")]))).grid(
+            row=9, column=2, sticky="e")
+        result = tk.Label(panel, text="", bg=bg, fg="#555", wraplength=320, justify="left")
+        result.grid(row=10, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        def toggle_email():
+            email.configure(state="normal" if auth.get() == "cloud" else "disabled")
+        toggle_email()
+
+        def current_token():
+            return token.get().strip() or self._jira_token or unprotect_token(cfg.get("token", ""))
+
+        def gather():
+            new = {"base_url": jira_base_url(base.get()), "auth": auth.get(),
+                   "email": email.get().strip(), "ca_file": ca.get().strip()}
+            tok = current_token()
+            if remember.get() and tok:
+                new["token"] = protect_token(tok)
+            return new, tok
+
+        def test():
+            new, tok = gather()
+            client = JiraClient(new["base_url"], new["auth"], tok, new["email"], new["ca_file"])
+            result.configure(text="Testing\u2026", fg="#555")
+
+            def ok(name):
+                if result.winfo_exists():
+                    result.configure(text=f"\u2713 Connected as {name}.", fg="#2d8738")
+                self._status(f"Jira connection works - connected as {name}.")
+
+            self._run_bg(client.myself, ok, "Testing the Jira connection\u2026")
+
+        def save():
+            new, tok = gather()
+            if not new["base_url"]:
+                result.configure(text="Enter your Jira address first.", fg="#c0392b")
+                return
+            save_jira_config(new)
+            self._jira_token = tok
+            self._close_prompt()
+            self._render_jira()
+            self._status("Jira connection saved" + ("" if new.get("token") else
+                         " (token kept for this session only)") + ".")
+
+        def disconnect():
+            if os.path.exists(JIRA_FILE):
+                os.remove(JIRA_FILE)
+            self._jira_token = ""
+            self._close_prompt()
+            self._render_jira()
+            self._status("Jira connection removed from this computer.")
+
+        btns = tk.Frame(panel, bg=bg)
+        btns.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Button(btns, text="Save", command=save).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self._close_prompt).pack(side="right", padx=4)
+        ttk.Button(btns, text="Test connection", command=test).pack(side="left")
+        if cfg:
+            ttk.Button(btns, text="Disconnect", command=disconnect).pack(side="left", padx=4)
+        panel.columnconfigure(1, weight=1)
+        panel.place(relx=0.5, rely=0.06, anchor="n")
+        panel.lift()
+        base.focus_set()
 
     def _jira_attach_file(self):
         path = filedialog.askopenfilename(
@@ -3442,8 +3852,18 @@ class App(tk.Tk):
             return
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
-                issues = parse_jira_issues(f.read())
-        except (OSError, ValueError, ET.ParseError) as exc:
+                text = f.read()
+        except OSError as exc:
+            messagebox.showerror("Import Jira XML", f"Couldn't read that file:\n{exc}")
+            return
+        self._import_jira_text(text)
+
+    def _import_jira_text(self, text, create=True):
+        """Apply Jira XML (one or many issues): refresh tickets you already
+        have; with create=True, add the rest as new tasks."""
+        try:
+            issues = parse_jira_issues(text)
+        except (ValueError, ET.ParseError) as exc:
             messagebox.showerror("Import Jira XML", f"Couldn't read that Jira export:\n{exc}")
             return
 
@@ -3465,7 +3885,7 @@ class App(tk.Tk):
                         names.append(issue[kind])
                 task["jira"] = issue
                 refreshed.append(issue["key"])
-            else:
+            elif create:
                 by_project.setdefault(self.active_project or issue["project"], []).append(
                     jira_task(issue))
         if refreshed:

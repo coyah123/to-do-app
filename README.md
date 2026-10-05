@@ -370,6 +370,47 @@ too) creates one task per issue — a single ticket or a whole search export:
 - Tickets you **already have** as tasks aren't duplicated. Their attached
   copy is refreshed and the same "your edits win" rules apply.
 
+### Optional: connect directly to Jira (personal access token)
+
+Instead of exporting XML by hand, the app can fetch tickets itself. It's
+**optional** and **read-only** (it never changes anything in Jira) — it
+requests the same XML as **Export → XML**, so everything above applies.
+
+**Set up — Settings → Jira connection…**
+
+| Field | What to enter |
+|---|---|
+| **Jira address** | Your Jira's address, e.g. `https://jira.yourcompany.com` (custom domains are fine; pasting any ticket URL works too — the app keeps just the address) |
+| **Type** | **Server / Data Center** for a *personal access token* (Profile → Personal Access Tokens in Jira), or **Cloud** (`*.atlassian.net`) for email + *API token* |
+| **Email (Cloud)** | Only for Cloud |
+| **Token** | Your personal access token / API token (shown as dots) |
+| **Remember token** | Optional. Off = the token is kept in memory until you close the app. On = saved encrypted with your **Windows login** (Windows), or in a file only your user can read (macOS/Linux) |
+| **CA file (optional)** | If your company uses its own HTTPS certificates and you get an SSL error, point this at the company CA certificate (`.pem`/`.crt`) |
+
+Click **Test connection** ("✓ Connected as …"), then **Save**.
+**Disconnect** removes the saved connection from this computer.
+
+**Use it**
+
+- **Jira tab → Ticket:** type a key like `MDA-12` (or paste the ticket URL)
+  and click **Fetch from Jira** (or press Enter). Once attached, the button
+  becomes **Refresh from Jira** to pull the latest version.
+- **File → Import from Jira search…:** enter a JQL query (default
+  `assignee = currentUser() AND resolution = Unresolved`). Matching tickets
+  become tasks in the selected project; ones you already have are refreshed.
+- **File → Refresh all Jira tickets:** re-fetches every attached ticket in
+  one go.
+
+All "your edits win" rules apply to fetched tickets. Network calls run in
+the background, so the window never freezes; problems (wrong/expired token,
+no permission, SSO login page, SSL, can't reach Jira) are explained in plain
+words.
+
+**Security notes:** the connection lives in `profile/jira.json`, which is
+gitignored with the rest of `profile/`. Create the token with an expiry
+date, use it only for this, and check your company's policy on personal
+access tokens. Never paste a token into chats or tickets.
+
 > **Epic names:** Jira's XML only includes the epic's *key* (e.g. `MDA-3`),
 > not its name, so that's what the epic is called. Rename it in **Subgroups,
 > Epics & Sprints** if you like.
@@ -399,9 +440,9 @@ Paste the result straight into a Confluence page.
 
 | Menu | Items |
 |---|---|
-| **File** | Share selected… · Import shared tasks… · Import Jira XML… |
+| **File** | Share selected… · Import shared tasks… · Import Jira XML… · Import from Jira search… · Refresh all Jira tickets |
 | **View** | Buddy · Manager · Visual Planner · **Default view** (one option per view) · Buddy always on top |
-| **Settings** | Your name… |
+| **Settings** | Your name… · Jira connection… |
 
 On **macOS** use **Cmd** wherever this guide says Ctrl (Cmd+1, Cmd+S, …);
 right-click is a two-finger click or **Ctrl+click**.
@@ -427,6 +468,7 @@ folder is **gitignored** — nothing in it is ever pushed to GitHub.
 | `profile/data.json` | Your projects, subgroups, epics, sprints and tasks (incl. links, custom field values and attached Jira tickets) |
 | `profile/settings.json` | Your name, default view, window sizes/positions, Buddy & Planner filters, collapsed folders |
 | `profile/fields.json` | Your custom field list |
+| `profile/jira.json` | Optional Jira connection: address, type, and the token *only* if you chose "Remember" (encrypted on Windows) |
 
 - **Upgrading from an older version:** `todo-data.json` and
   `todo-settings.json` next to the app are moved into `profile/`
