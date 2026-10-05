@@ -26,7 +26,8 @@ each view remembers its own window size/position.
 
 - **Buddy** (default) — a small sticky note that opens in the top-right
   corner and stays on top of other windows (toggle with the pin button).
-  Shows every project as a bold, collapsible folder with its tasks
+  Shows every project as a bold, collapsible folder (with its groups as
+  sub-folders) and its tasks
   underneath — a colored dot marks each task's status, most active first,
   with due dates (overdue ones bold and marked `!`). Filter by sprint at the
   top. Select a project (or one of its tasks) and type in the box at the
@@ -34,7 +35,7 @@ each view remembers its own window size/position.
   double-click to open it in Manager.
 - **Manager** — the full editor described below.
 - **Visual Planner** — a Trello-style board. Pick what the columns are
-  (Status / Epic / Sprint / Project), filter by project, epic and sprint, and
+  (Status / Group / Epic / Sprint / Project), filter by project, epic and sprint, and
   choose the card order (Manual / Due date / Created / Title).
   - **Drag** a card to another column to change that field — status, epic,
     sprint, or even move it to another project. In Manual order you can
@@ -47,14 +48,17 @@ each view remembers its own window size/position.
 
 - Three resizable panes: project/task tree, task table, task details form.
 - Projects: add / delete (left panel).
+- Groups: sub-folders inside a project for related tasks (e.g. an app).
+  Select a project, type a name and click **+ Group**. In the left tree,
+  **drag tasks** onto a group to move them in, onto the project to take them
+  out, or onto another task to join its group. Dragging onto a different
+  project moves the task there. Selecting a group then **New Task** creates
+  the task inside it.
 - Tasks under each project with fields:
   - Title, Description
   - Status (dropdown, color-coded): Not started (grey), In Progress (purple),
     Blocked (red), Waiting for approval (orange), Done (green)
-  - Epic and Sprint — picked from the project's lists
-- Epics & Sprints tab: pick a project, then add / rename / delete its epics
-  and sprints. Renaming updates every task using it; deleting leaves those
-  tasks unassigned. Shows task and open counts for each.
+  - Group, Epic and Sprint — picked from the project's lists
   - Created Date (auto-stamped from system time)
   - Due Date
   - Completed Date (auto-stamped when status is set to Done)
@@ -64,8 +68,11 @@ each view remembers its own window size/position.
     is a hyperlink: click it to open the link in your browser. Bare
     addresses like `example.com/page` get `https://` added. Use "edit" / ✕
     to change or remove one.
-- Task table: group by Epic / Sprint / Status, click a column header to sort,
-  "Hide Done" filter. Click a task in the tree or table to edit it.
+- Task table: group by Group / Epic / Sprint / Status, click a column header
+  to sort, "Hide Done" filter. Click a task in the tree or table to edit it.
+- Groups, Epics & Sprints tab: pick a project, then add / rename / delete its
+  groups, epics and sprints. Renaming updates every task using it; deleting
+  leaves those tasks unassigned. Shows task and open counts for each.
 - Shortcuts: Ctrl+S save, Ctrl+N new task.
 
 ## Data & privacy

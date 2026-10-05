@@ -59,6 +59,7 @@ DONE = "Done"
 TASK_FIELDS = [
     ("title", "Title"),
     ("status", "Status"),
+    ("group", "Group"),
     ("epic", "Epic"),
     ("sprint", "Sprint"),
     ("description", "Description"),
@@ -82,10 +83,11 @@ TABLE_COLS = [
     ("added_date", "Created", 110, False),
 ]
 
-GROUP_OPTIONS = ["None", "Epic", "Sprint", "Status"]
+GROUP_OPTIONS = ["None", "Group", "Epic", "Sprint", "Status"]
 
-# Named per-project lists that tasks are assigned to.
-GROUP_KINDS = ["epic", "sprint"]
+# Named per-project lists that tasks are assigned to. "group" is a plain
+# sub-folder of a project (e.g. an app), shown nested in the sidebar trees.
+GROUP_KINDS = ["group", "epic", "sprint"]
 
 # Views, selectable from the View menu. Buddy is the default.
 VIEWS = ["Buddy", "Manager", "Visual Planner"]
@@ -107,7 +109,7 @@ ALL_SPRINTS = "All sprints"
 NO_SPRINT = "(no sprint)"
 
 # Visual Planner (Trello-style board).
-PLANNER_COLUMNS = ["Status", "Epic", "Sprint", "Project"]
+PLANNER_COLUMNS = ["Status", "Group", "Epic", "Sprint", "Project"]
 PLANNER_ORDER = ["Manual", "Due date", "Created", "Title"]
 ANY = "All"
 NONE_LABEL = "(none)"
@@ -216,8 +218,8 @@ class Store:
             for task in tasks:
                 if task.get("status") not in STATUSES:
                     task["status"] = DONE if task.get("completed_date") else DEFAULT_STATUS
-                task.setdefault("epic", "")
-                task.setdefault("sprint", "")
+                for kind in GROUP_KINDS:
+                    task.setdefault(kind, "")
                 task.setdefault("links", [])
             for task in tasks:
                 if not isinstance(task.get("rank"), (int, float)):
@@ -674,6 +676,8 @@ class App(tk.Tk):
         meta = []
         if show_project and mode != "Project":
             meta.append(project)
+        if task.get("group") and mode != "Group":
+            meta.append("\u25a3 " + task["group"])
         if task.get("epic") and mode != "Epic":
             meta.append("\u25c6 " + task["epic"])
         if task.get("sprint") and mode != "Sprint":
@@ -716,12 +720,12 @@ class App(tk.Tk):
         if mode == "Status":
             self.f_status.set(value)
             self._on_status_change()
-        elif mode in ("Epic", "Sprint") and value:
+        elif mode.lower() in GROUP_KINDS and value:
             kind = mode.lower()
             if value not in self.store.names(project, kind):
                 self.store.add_name(project, kind, value)
                 self._refresh_choices()
-            (self.f_epic if kind == "epic" else self.f_sprint).set(value)
+            self.f_kinds[kind].set(value)
         self._highlight_cards()
         self.f_title.focus_set()
         self._status(f"New card in '{project}' - give it a title, then Save (Ctrl+S).")
@@ -841,17 +845,26 @@ class App(tk.Tk):
 
         if mode == "Status":
             set_status(task, value)
-        elif mode in ("Epic", "Sprint"):
+        elif mode.lower() in GROUP_KINDS:
             task[mode.lower()] = value
 
         dest = value if mode == "Project" else project
-        # Epics/sprints are per project: make sure dest knows this task's.
+        self._relocate_task(project, index, task, dest)
+        self._refresh_planner()
+        self._highlight_cards()
+        where = f"{mode.lower()} '{value or 'none'}'"
+        self._status(f"Moved '{task.get('title', '')}' to {where}.")
+
+    def _relocate_task(self, project, index, task, dest):
+        """Save a task that was dragged somewhere - possibly into another
+        project - keeping the form pointed at the right task."""
+        # Groups/epics/sprints are per project: make sure dest knows this task's.
         for kind in GROUP_KINDS:
             names = self.store.groups[kind].setdefault(dest, [])
             if task.get(kind) and task[kind] not in names:
                 names.append(task[kind])
 
-        editing = (self.active_project, self.editing_index) == key
+        editing = (self.active_project, self.editing_index) == (project, index)
         if dest != project:
             new_index = self.store.move_task(project, index, dest, task)
             if editing:
@@ -863,19 +876,14 @@ class App(tk.Tk):
             self.store.update_task(project, index, task)
 
         if editing:
-            # Update only what the drop changed; keep other unsaved edits.
+            # Update only what the drag changed; keep other unsaved edits.
             self._refresh_choices()
             self.f_status.set(task["status"])
             self._completed_date = task.get("completed_date", "")
             self.f_completed_lbl.configure(text=f"Completed: {self._completed_date or '-'}")
             self._update_status_pill()
-            self.f_epic.set(task.get("epic", ""))
-            self.f_sprint.set(task.get("sprint", ""))
-
-        self._refresh_planner()
-        self._highlight_cards()
-        where = f"{mode.lower()} '{value or 'none'}'"
-        self._status(f"Moved '{task.get('title', '')}' to {where}.")
+            for kind, combo in self.f_kinds.items():
+                combo.set(task.get(kind, ""))
 
     # -- Buddy view -------------------------------------------------------
     def _build_buddy(self):
@@ -942,7 +950,9 @@ class App(tk.Tk):
         self.b_tree.bind("<<TreeviewSelect>>", lambda e: self._buddy_update_add())
         self.b_tree.bind("<<TreeviewOpen>>", lambda e: self._buddy_fold(True))
         self.b_tree.bind("<<TreeviewClose>>", lambda e: self._buddy_fold(False))
-        self.b_project_rows = {}  # row id -> project
+        # project/group row id -> (project, group); group is "" for a project row
+        self.b_folder_rows = {}
+        self.b_tree.tag_configure("group", font=("", 9, "bold"), foreground="#554")
         self.b_tree.bind("<Button-3>", self._buddy_menu)
         self.b_meta = {}  # row id -> (project, index)
 
@@ -966,22 +976,33 @@ class App(tk.Tk):
         sprint = self._buddy_sprints(projects)
         self.settings["buddy_sprint"] = sprint
         self.settings["buddy_hide_done"] = self.b_hide_done.get()
+        # Collapsed folders: "project" or "project/group".
         collapsed = set(self.settings.get("buddy_collapsed", []))
         today = datetime.now().strftime("%Y-%m-%d")
 
         selected = self.b_tree.selection()
-        keep = self.b_meta.get(selected[0]) if selected else None
-        if selected and selected[0] in self.b_project_rows:
-            keep = self.b_project_rows[selected[0]]
+        keep = None
+        if selected:
+            keep = self.b_meta.get(selected[0]) or self.b_folder_rows.get(selected[0])
 
         self.b_tree.delete(*self.b_tree.get_children())
-        self.b_meta, self.b_project_rows = {}, {}
+        self.b_meta, self.b_folder_rows = {}, {}
         counts = {st: 0 for st in STATUS_ORDER}
         reselect = None
+
+        def folder(parent, project, group, items):
+            open_n = sum(1 for _, t in items if t.get("status") != DONE)
+            fold_key = f"{project}/{group}" if group else project
+            row = self.b_tree.insert(
+                parent, "end", text=f"{group or project}  ({open_n})",
+                open=fold_key not in collapsed, tags=("group" if group else "project",),
+            )
+            self.b_folder_rows[row] = (project, group)
+            return row
+
         for project in projects:
-            tasks = self.store.projects[project]
             items = []
-            for i, t in enumerate(tasks):
+            for i, t in enumerate(self.store.projects[project]):
                 if self.b_hide_done.get() and t.get("status") == DONE:
                     continue
                 if sprint == NO_SPRINT and t.get("sprint"):
@@ -995,14 +1016,15 @@ class App(tk.Tk):
             ))
             for _, t in items:
                 counts[t.get("status", DEFAULT_STATUS)] += 1
-            open_n = sum(1 for _, t in items if t.get("status") != DONE)
-            parent = self.b_tree.insert(
-                "", "end", text=f"{project}  ({open_n})",
-                open=project not in collapsed, tags=("project",),
-            )
-            self.b_project_rows[parent] = project
-            if keep == project:
-                reselect = parent
+
+            parents = {"": folder("", project, "", items)}
+            for name in self.store.names(project, "group"):
+                mine = [it for it in items if it[1].get("group") == name]
+                parents[name] = folder(parents[""], project, name, mine)
+            for row, key in self.b_folder_rows.items():
+                if key == keep:
+                    reselect = row
+
             for i, t in items:
                 status = t.get("status", DEFAULT_STATUS)
                 due = t.get("due_date", "")
@@ -1012,7 +1034,8 @@ class App(tk.Tk):
                 if overdue:
                     due = "! " + due
                 rid = self.b_tree.insert(
-                    parent, "end", text=" " + (t.get("title") or "(untitled)"),
+                    parents.get(t.get("group"), parents[""]), "end",
+                    text=" " + (t.get("title") or "(untitled)"),
                     image=self.b_dots[status], values=(due,),
                     tags=("overdue",) if overdue else (),
                 )
@@ -1028,38 +1051,44 @@ class App(tk.Tk):
         self._buddy_update_add()
 
     def _buddy_fold(self, opened):
-        """Remember which projects are collapsed."""
-        project = self.b_project_rows.get(self.b_tree.focus())
-        if not project:
+        """Remember which projects/groups are collapsed."""
+        key = self.b_folder_rows.get(self.b_tree.focus())
+        if not key:
             return
+        project, group = key
+        fold_key = f"{project}/{group}" if group else project
         collapsed = set(self.settings.get("buddy_collapsed", []))
-        (collapsed.discard if opened else collapsed.add)(project)
+        (collapsed.discard if opened else collapsed.add)(fold_key)
         self.settings["buddy_collapsed"] = sorted(collapsed)
         save_settings(self.settings)
 
     def _buddy_target(self):
-        """Project quick-add goes to: the selected row's, else the last used."""
+        """(project, group) quick-add goes to: the selected row's, else the
+        last project used."""
         sel = self.b_tree.selection()
         if sel:
-            if sel[0] in self.b_project_rows:
-                return self.b_project_rows[sel[0]]
+            if sel[0] in self.b_folder_rows:
+                return self.b_folder_rows[sel[0]]
             if sel[0] in self.b_meta:
-                return self.b_meta[sel[0]][0]
+                project, i = self.b_meta[sel[0]]
+                return project, self.store.projects[project][i].get("group", "")
         last = self.settings.get("buddy_add_project")
-        return last if last in self.store.projects else None
+        return (last, "") if last in self.store.projects else (None, "")
 
     def _buddy_update_add(self):
-        project = self._buddy_target()
-        self.b_add_lbl.configure(text=f"{project} \u25b8" if project else "select a project \u25b8")
+        project, group = self._buddy_target()
+        where = f"{project} / {group}" if group else project
+        self.b_add_lbl.configure(text=f"{where} \u25b8" if project else "select a project \u25b8")
         for w in (self.b_entry, self.b_add_btn):
             w.state(["!disabled"] if project else ["disabled"])
 
     def _buddy_add(self):
-        project = self._buddy_target()
+        project, group = self._buddy_target()
         title = self.b_entry.get().strip()
         if not title or not project:
             return
         task = new_task(title)
+        task["group"] = group
         sprint = self.b_sprint.get()
         if sprint not in (ALL_SPRINTS, NO_SPRINT) and sprint in self.store.names(project, "sprint"):
             task["sprint"] = sprint  # stays visible under the current filter
@@ -1156,8 +1185,11 @@ class App(tk.Tk):
         self.project_entry = ttk.Entry(add_row, width=18)
         self.project_entry.pack(side="left", fill="x", expand=True)
         self.project_entry.bind("<Return>", lambda e: self._add_project())
-        ttk.Button(add_row, text="Add", width=5, command=self._add_project).pack(
+        ttk.Button(add_row, text="+ Project", width=9, command=self._add_project).pack(
             side="left", padx=(4, 0)
+        )
+        ttk.Button(add_row, text="+ Group", width=8, command=self._add_group).pack(
+            side="left", padx=(2, 0)
         )
 
         btns = ttk.Frame(left)
@@ -1182,6 +1214,13 @@ class App(tk.Tk):
         yscroll.pack(side="left", fill="y")
         self.tree.configure(yscrollcommand=yscroll.set)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_tree_select())
+        # Drag tasks onto a group / project / other task to regroup them.
+        self.tree.bind("<ButtonPress-1>", self._tree_press, add="+")
+        self.tree.bind("<B1-Motion>", self._tree_motion, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._tree_release, add="+")
+        self._tdrag = None
+        self.tree.tag_configure("drop", background="#cfe0fb")
+        self.tree.tag_configure("group", font=("", 9, "bold"), foreground="#335")
         self.tree.tag_configure("project", font=("", 10, "bold"))
         for color, tag in STATUSES.values():
             self.tree.tag_configure(tag, foreground=color)
@@ -1212,7 +1251,7 @@ class App(tk.Tk):
         tasks_tab = ttk.Frame(self.notebook, padding=4)
         groups_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(tasks_tab, text="Tasks")
-        self.notebook.add(groups_tab, text="Epics & Sprints")
+        self.notebook.add(groups_tab, text="Groups, Epics & Sprints")
         self._build_groups_tab(groups_tab)
         center = tasks_tab
 
@@ -1265,7 +1304,7 @@ class App(tk.Tk):
 
         cols = ttk.Frame(tab)
         cols.pack(fill="both", expand=True)
-        cols.columnconfigure((0, 1), weight=1, uniform="g")
+        cols.columnconfigure(tuple(range(len(GROUP_KINDS))), weight=1, uniform="g")
         cols.rowconfigure(0, weight=1)
         # kind -> (listing treeview, name entry)
         self.g_widgets = {}
@@ -1330,13 +1369,16 @@ class App(tk.Tk):
         self.f_sprint.grid(row=r, column=3, sticky="ew", **pad)
         r += 1
 
-        ttk.Label(form, text="Due").grid(row=r, column=0, sticky="e", **pad)
-        self.f_due = ttk.Entry(form, width=14)
-        self.f_due.grid(row=r, column=1, sticky="ew", **pad)
-        ttk.Label(form, text="YYYY-MM-DD", foreground="#888").grid(
-            row=r, column=2, columnspan=2, sticky="w", **pad
-        )
+        ttk.Label(form, text="Group").grid(row=r, column=0, sticky="e", **pad)
+        self.f_group = ttk.Combobox(form, width=12)
+        self.f_group.grid(row=r, column=1, sticky="ew", **pad)
+        ttk.Label(form, text="Due").grid(row=r, column=2, sticky="e", **pad)
+        self.f_due = ttk.Entry(form, width=10)
+        self.f_due.grid(row=r, column=3, sticky="ew", **pad)
+        self.f_due.bind("<FocusIn>", lambda e: self._status("Due date format: YYYY-MM-DD"))
         r += 1
+        # kind -> dropdown, for code that treats group/epic/sprint alike
+        self.f_kinds = {"group": self.f_group, "epic": self.f_epic, "sprint": self.f_sprint}
 
         ttk.Label(form, text="Jira").grid(row=r, column=0, sticky="e", **pad)
         self.f_jira_made = tk.BooleanVar(value=False)
@@ -1526,7 +1568,7 @@ class App(tk.Tk):
         state = "normal" if enabled else "disabled"
         for w in (self.f_title, self.f_due, self.f_desc, self.f_blockers, self.f_notes):
             w.configure(state=state)
-        for w in (self.status_cb, self.f_epic, self.f_sprint):
+        for w in (self.status_cb, self.f_group, self.f_epic, self.f_sprint):
             w.configure(state="readonly" if enabled else "disabled")
         self.jira_chk.state(["!disabled"] if enabled else ["disabled"])
         for w in (self.f_link_title, self.f_link_desc, self.f_link_url, self.f_link_btn):
@@ -1549,8 +1591,8 @@ class App(tk.Tk):
     def _refresh_choices(self):
         """Epic/sprint dropdowns offer the project's lists (blank = none)."""
         p = self.active_project
-        self.f_epic.configure(values=[""] + self.store.names(p, "epic"))
-        self.f_sprint.configure(values=[""] + self.store.names(p, "sprint"))
+        for kind, combo in self.f_kinds.items():
+            combo.configure(values=[""] + self.store.names(p, kind))
 
     def _clear_form(self):
         self._load_task_into_form({})
@@ -1561,8 +1603,8 @@ class App(tk.Tk):
         self._refresh_choices()
         self._set_entry(self.f_title, task.get("title", ""))
         self._set_entry(self.f_due, task.get("due_date", ""))
-        self.f_epic.set(task.get("epic", ""))
-        self.f_sprint.set(task.get("sprint", ""))
+        for kind, combo in self.f_kinds.items():
+            combo.set(task.get(kind, ""))
         self._set_text(self.f_desc, task.get("description", ""))
         self._set_text(self.f_blockers, task.get("blockers", ""))
         self._set_text(self.f_notes, task.get("notes", ""))
@@ -1590,6 +1632,9 @@ class App(tk.Tk):
         self._sync_selection()
 
     def _refresh_tree(self):
+        # Keep collapsed projects/groups collapsed across rebuilds.
+        closed = {meta for item, meta in self.node_meta.items()
+                  if meta[0] != "task" and not self.tree.item(item, "open")}
         self.tree.delete(*self.tree.get_children())
         self.node_meta = {}
         for project in sorted(self.store.projects, key=str.lower):
@@ -1597,17 +1642,88 @@ class App(tk.Tk):
             open_count = sum(1 for t in tasks if t.get("status") != DONE)
             pid = self.tree.insert(
                 "", "end", text=f"\U0001F4C1 {project}  ({open_count}/{len(tasks)})",
-                open=True, tags=("project",)
+                open=("project", project) not in closed, tags=("project",)
             )
             self.node_meta[pid] = ("project", project)
+            # Groups first, then tasks not in a group directly under the project.
+            group_nodes = {}
+            for name in self.store.names(project, "group"):
+                mine = [t for t in tasks if t.get("group") == name]
+                open_n = sum(1 for t in mine if t.get("status") != DONE)
+                gid = self.tree.insert(
+                    pid, "end", text=f"\U0001F4C2 {name}  ({open_n}/{len(mine)})",
+                    open=("group", project, name) not in closed, tags=("group",),
+                )
+                self.node_meta[gid] = ("group", project, name)
+                group_nodes[name] = gid
             for i, task in enumerate(tasks):
                 status = task.get("status", DEFAULT_STATUS)
                 mark = "✓ " if status == DONE else "● "
                 tid = self.tree.insert(
-                    pid, "end", text=mark + (task.get("title") or "(untitled)"),
+                    group_nodes.get(task.get("group"), pid), "end",
+                    text=mark + (task.get("title") or "(untitled)"),
                     tags=(STATUSES[status][1],),
                 )
                 self.node_meta[tid] = ("task", project, i)
+
+    def _tree_press(self, event):
+        meta = self.node_meta.get(self.tree.identify_row(event.y))
+        self._tdrag = None
+        if meta and meta[0] == "task":
+            self._tdrag = {"key": meta[1:], "x": event.x, "y": event.y,
+                           "active": False, "target": None}
+
+    def _tree_mark(self, item, on):
+        if item and self.tree.exists(item):
+            tags = [t for t in self.tree.item(item, "tags") if t != "drop"]
+            self.tree.item(item, tags=tags + (["drop"] if on else []))
+
+    def _tree_motion(self, event):
+        d = self._tdrag
+        if not d:
+            return None
+        if not d["active"]:
+            if abs(event.x - d["x"]) + abs(event.y - d["y"]) < 6:
+                return None
+            d["active"] = True
+            self.tree.configure(cursor="fleur")
+        if event.y < 12:
+            self.tree.yview_scroll(-1, "units")
+        elif event.y > self.tree.winfo_height() - 12:
+            self.tree.yview_scroll(1, "units")
+        target = self.tree.identify_row(event.y)
+        if target != d["target"]:
+            self._tree_mark(d["target"], False)
+            self._tree_mark(target, True)
+            d["target"] = target
+        return "break"
+
+    def _tree_release(self, event):
+        d, self._tdrag = self._tdrag, None
+        if not d or not d["active"]:
+            return None
+        self.tree.configure(cursor="")
+        self._tree_mark(d["target"], False)
+        meta = self.node_meta.get(d["target"])
+        if not meta:
+            return "break"
+        if meta[0] == "project":
+            dest, group = meta[1], ""          # out of any group
+        elif meta[0] == "group":
+            dest, group = meta[1], meta[2]
+        else:                                  # onto a task: join its group
+            dest = meta[1]
+            group = self.store.projects[dest][meta[2]].get("group", "")
+        project, index = d["key"]
+        task = dict(self.store.projects[project][index])
+        if (dest, group) == (project, task.get("group", "")):
+            return "break"
+        task["group"] = group
+        self._relocate_task(project, index, task, dest)
+        self._refresh_views()
+        where = f"group '{group}'" if group else "no group"
+        self._status(f"Moved '{task.get('title', '')}' to {dest} / {where}.")
+        return "break"
 
     def _sort_key(self, task):
         col = self.sort_col
@@ -1694,6 +1810,12 @@ class App(tk.Tk):
                 if self.editing_index is not None:
                     node = self._find_task_node(self.active_project, self.editing_index)
                 if node is None:
+                    # Starting a task from a group row: keep that group selected.
+                    sel = self.tree.selection()
+                    cur = self.node_meta.get(sel[0]) if sel else None
+                    if cur and cur[0] == "group" and cur[1] == self.active_project:
+                        node = sel[0]
+                if node is None:
                     node = self._find_project_node(self.active_project)
             if node:
                 self.tree.selection_set(node)
@@ -1757,12 +1879,13 @@ class App(tk.Tk):
             entry.insert(0, sel[0])
 
     def _group_changed(self, kind, old, new):
-        """Refresh views after an epic/sprint was renamed or deleted."""
-        combo = self.f_epic if kind == "epic" else self.f_sprint
+        """Refresh views after a group/epic/sprint was renamed or deleted."""
+        combo = self.f_kinds[kind]
         current = combo.get()
         self._refresh_choices()
         if old is not None and current == old:
             combo.set(new)
+        self._refresh_tree()
         self._refresh_table()
         self._refresh_groups()
         self._sync_selection()
@@ -1848,6 +1971,10 @@ class App(tk.Tk):
         if meta[0] == "project":
             self._select_project(meta[1])
             self._status(f"Project '{meta[1]}' - click 'New Task' to add one.")
+        elif meta[0] == "group":
+            self._select_project(meta[1])
+            self.f_group.set(meta[2])  # a new task starts in this group
+            self._status(f"Group '{meta[2]}' - 'New Task' adds to it; drag tasks here.")
         else:
             self._select_task(meta[1], meta[2])
 
@@ -1873,6 +2000,33 @@ class App(tk.Tk):
         self._refresh_views()
         self._status(f"Added project '{name}'. Now click 'New Task' to add tasks.")
 
+    def _add_group(self):
+        name = self.project_entry.get().strip()
+        project = self.active_project
+        if not project:
+            self._status("Select a project, type a group name, then '+ Group'.")
+            return
+        if not name:
+            self._status("Type a group name in the box, then '+ Group'.")
+            self.project_entry.focus_set()
+            return
+        if not self.store.add_name(project, "group", name):
+            self._status(f"Group '{name}' already exists in '{project}'.")
+            return
+        self.project_entry.delete(0, "end")
+        # Same as clicking the new group: form ready for a task in it.
+        self.editing_index = None
+        self._clear_form()
+        self.f_group.set(name)
+        self._refresh_views()
+        for item, meta in self.node_meta.items():
+            if meta == ("group", project, name):
+                self._syncing = True  # selection only; don't reload the form
+                self.tree.selection_set(item)
+                self.tree.see(item)
+                self.after_idle(self._end_sync)
+        self._status(f"Added group '{name}' to '{project}'. Drag tasks onto it.")
+
     def _delete_project(self):
         if not self.active_project:
             self._status("Select a project first.")
@@ -1893,11 +2047,24 @@ class App(tk.Tk):
         if not self.active_project:
             self._status("Select a project in the list first, then click New Task.")
             return
+        # Start in the group that's selected in the sidebar (or the selected
+        # task's group), so new tasks land next to related ones.
+        group = ""
+        if self.view == "Manager":
+            sel = self.tree.selection()
+            meta = self.node_meta.get(sel[0]) if sel else None
+            if meta and meta[1] == self.active_project:
+                if meta[0] == "group":
+                    group = meta[2]
+                elif meta[0] == "task":
+                    group = self.store.projects[meta[1]][meta[2]].get("group", "")
         self.editing_index = None
         self._clear_form()
+        self.f_group.set(group)
         self._sync_selection()
         self.f_title.focus_set()
-        self._status(f"Entering new task under '{self.active_project}'. Fill in + Save.")
+        where = f"{self.active_project} / {group}" if group else self.active_project
+        self._status(f"Entering new task under '{where}'. Fill in + Save.")
 
     def _save_task(self):
         if not self.active_project or self.save_btn.instate(["disabled"]):
@@ -1916,6 +2083,7 @@ class App(tk.Tk):
         task = {
             "title": title,
             "status": status,
+            "group": self.f_group.get().strip(),
             "epic": self.f_epic.get().strip(),
             "sprint": self.f_sprint.get().strip(),
             "description": self.f_desc.get("1.0", "end").strip(),
