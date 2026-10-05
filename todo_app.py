@@ -5,7 +5,12 @@ Pure Python standard library (tkinter + csv + json) so it runs on an
 airgapped machine with no pip installs. XLSX export uses openpyxl if it
 happens to be available; CSV export always works.
 
-Run with pythonw / the .pyw launcher to avoid a console window.
+Everything happens inside the main window - no pop-up dialogs for adding
+projects or editing tasks. The sidebar is a tree: projects at the top with
+their tasks nested underneath. The only OS dialog used is the native file
+picker for exports.
+
+Runs on Windows, macOS, and Linux.
 """
 
 import csv
@@ -29,7 +34,7 @@ except ImportError:
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(APP_DIR, "todo-data.json")
 
-# Task field order used everywhere (storage, UI, export).
+# Task field order used everywhere (storage, export).
 TASK_FIELDS = [
     ("title", "Title"),
     ("description", "Description"),
@@ -96,184 +101,84 @@ class Store:
 
 
 # ---------------------------------------------------------------------------
-# Task editor dialog
-# ---------------------------------------------------------------------------
-class TaskDialog(tk.Toplevel):
-    def __init__(self, master, task=None):
-        super().__init__(master)
-        self.title("Edit Task" if task else "New Task")
-        self.resizable(False, False)
-        self.result = None
-        self.transient(master)
-        self.grab_set()
-
-        task = task or {}
-        self.vars = {}
-        row = 0
-        pad = {"padx": 8, "pady": 4}
-
-        def label(text):
-            nonlocal row
-            ttk.Label(self, text=text).grid(row=row, column=0, sticky="ne", **pad)
-
-        # Title
-        label("Title *")
-        self.title_entry = ttk.Entry(self, width=50)
-        self.title_entry.insert(0, task.get("title", ""))
-        self.title_entry.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Description
-        label("Description")
-        self.desc_text = tk.Text(self, width=50, height=3)
-        self.desc_text.insert("1.0", task.get("description", ""))
-        self.desc_text.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Due date
-        label("Due Date")
-        self.due_entry = ttk.Entry(self, width=50)
-        self.due_entry.insert(0, task.get("due_date", ""))
-        self.due_entry.grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(self, text="(e.g. 2026-10-12)", foreground="#888").grid(
-            row=row, column=2, sticky="w"
-        )
-        row += 1
-
-        # Jira made?
-        label("Jira Ticket Made?")
-        self.jira_made_var = tk.BooleanVar(value=task.get("jira_made", False))
-        jira_chk = ttk.Checkbutton(
-            self,
-            text="Yes",
-            variable=self.jira_made_var,
-            command=self._toggle_jira,
-        )
-        jira_chk.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Jira ref
-        label("Jira Link / Number")
-        self.jira_ref_entry = ttk.Entry(self, width=50)
-        self.jira_ref_entry.insert(0, task.get("jira_ref", ""))
-        self.jira_ref_entry.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Blockers
-        label("Blockers")
-        self.blockers_text = tk.Text(self, width=50, height=2)
-        self.blockers_text.insert("1.0", task.get("blockers", ""))
-        self.blockers_text.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Notes
-        label("Notes")
-        self.notes_text = tk.Text(self, width=50, height=4)
-        self.notes_text.insert("1.0", task.get("notes", ""))
-        self.notes_text.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Completed
-        label("Completed?")
-        self.completed_var = tk.BooleanVar(value=bool(task.get("completed_date")))
-        self._existing_completed = task.get("completed_date", "")
-        ttk.Checkbutton(
-            self, text="Mark complete (stamps date)", variable=self.completed_var
-        ).grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Buttons
-        btns = ttk.Frame(self)
-        btns.grid(row=row, column=0, columnspan=3, pady=10)
-        ttk.Button(btns, text="Save", command=self._save).pack(side="left", padx=6)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
-
-        self._existing_added = task.get("added_date", "")
-        self._toggle_jira()
-        self.title_entry.focus_set()
-
-    def _toggle_jira(self):
-        state = "normal" if self.jira_made_var.get() else "disabled"
-        self.jira_ref_entry.configure(state=state)
-
-    def _save(self):
-        title = self.title_entry.get().strip()
-        if not title:
-            messagebox.showwarning("Missing title", "Title is required.", parent=self)
-            return
-
-        completed = self.completed_var.get()
-        if completed:
-            completed_date = self._existing_completed or now_stamp()
-        else:
-            completed_date = ""
-
-        self.result = {
-            "title": title,
-            "description": self.desc_text.get("1.0", "end").strip(),
-            "added_date": self._existing_added or now_stamp(),
-            "due_date": self.due_entry.get().strip(),
-            "completed_date": completed_date,
-            "jira_made": self.jira_made_var.get(),
-            "jira_ref": self.jira_ref_entry.get().strip()
-            if self.jira_made_var.get()
-            else "",
-            "blockers": self.blockers_text.get("1.0", "end").strip(),
-            "notes": self.notes_text.get("1.0", "end").strip(),
-        }
-        self.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Main application window
+# Main application window - everything lives here, no pop-up dialogs.
 # ---------------------------------------------------------------------------
 class App(tk.Tk):
     def __init__(self, store):
         super().__init__()
         self.store = store
         self.title("To-Do Tracker")
-        self.geometry("1000x600")
-        self.minsize(820, 480)
+        self.geometry("1120x680")
+        self.minsize(960, 560)
+
+        # The project the form is currently working under.
+        self.active_project = None
+        # Index of the task loaded in the form (None = unsaved new task).
+        self.editing_index = None
+        # Map tree item id -> ("project", name) or ("task", name, index).
+        self.node_meta = {}
 
         self._build_layout()
-        self._refresh_projects()
+        self._refresh_tree()
 
     # -- layout -----------------------------------------------------------
     def _build_layout(self):
-        # Left: projects panel
+        # Status bar (bottom)
+        self.status_var = tk.StringVar(value="Ready.")
+        status_bar = ttk.Frame(self, relief="sunken")
+        status_bar.pack(side="bottom", fill="x")
+        ttk.Label(
+            status_bar, textvariable=self.status_var, anchor="w", padding=(8, 3)
+        ).pack(side="left", fill="x", expand=True)
+
+        # --- Left: projects/tasks tree -----------------------------------
         left = ttk.Frame(self, padding=8)
         left.pack(side="left", fill="y")
 
-        ttk.Label(left, text="Projects", font=("", 11, "bold")).pack(anchor="w")
-        self.project_list = tk.Listbox(left, width=24, exportselection=False)
-        self.project_list.pack(fill="y", expand=True, pady=4)
-        self.project_list.bind("<<ListboxSelect>>", lambda e: self._refresh_tasks())
-
-        pbtns = ttk.Frame(left)
-        pbtns.pack(fill="x")
-        ttk.Button(pbtns, text="Add", command=self._add_project).pack(
-            side="left", expand=True, fill="x", padx=2
-        )
-        ttk.Button(pbtns, text="Delete", command=self._delete_project).pack(
-            side="left", expand=True, fill="x", padx=2
+        ttk.Label(left, text="Projects & Tasks", font=("", 11, "bold")).pack(
+            anchor="w"
         )
 
-        # Right: tasks panel
-        right = ttk.Frame(self, padding=8)
-        right.pack(side="left", fill="both", expand=True)
+        add_row = ttk.Frame(left)
+        add_row.pack(fill="x", pady=4)
+        self.project_entry = ttk.Entry(add_row, width=18)
+        self.project_entry.pack(side="left", fill="x", expand=True)
+        self.project_entry.bind("<Return>", lambda e: self._add_project())
+        ttk.Button(add_row, text="Add", width=5, command=self._add_project).pack(
+            side="left", padx=(4, 0)
+        )
 
-        # Toolbar
-        toolbar = ttk.Frame(right)
+        tree_wrap = ttk.Frame(left)
+        tree_wrap.pack(fill="both", expand=True, pady=4)
+        self.tree = ttk.Treeview(tree_wrap, show="tree", height=22, selectmode="browse")
+        self.tree.column("#0", width=250)
+        self.tree.pack(side="left", fill="both", expand=True)
+        yscroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
+        yscroll.pack(side="left", fill="y")
+        self.tree.configure(yscrollcommand=yscroll.set)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_tree_select())
+        # Visual cue: completed tasks dimmed/struck.
+        self.tree.tag_configure("done", foreground="#999")
+        self.tree.tag_configure("project", font=("", 10, "bold"))
+
+        btns = ttk.Frame(left)
+        btns.pack(fill="x", pady=(4, 0))
+        ttk.Button(btns, text="New Task", command=self._new_task).pack(
+            side="left", expand=True, fill="x", padx=1
+        )
+        ttk.Button(btns, text="Del Task", command=self._delete_task).pack(
+            side="left", expand=True, fill="x", padx=1
+        )
+        ttk.Button(left, text="Delete Project", command=self._delete_project).pack(
+            fill="x", pady=(4, 0)
+        )
+
+        # --- Middle: export toolbar + spacer -----------------------------
+        center = ttk.Frame(self, padding=8)
+        center.pack(side="left", fill="both", expand=True)
+
+        toolbar = ttk.Frame(center)
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="New Task", command=self._add_task).pack(side="left")
-        ttk.Button(toolbar, text="Edit", command=self._edit_task).pack(
-            side="left", padx=4
-        )
-        ttk.Button(toolbar, text="Delete", command=self._delete_task).pack(side="left")
-
-        ttk.Separator(toolbar, orient="vertical").pack(
-            side="left", fill="y", padx=8
-        )
         ttk.Button(toolbar, text="Export CSV", command=self._export_csv).pack(
             side="left"
         )
@@ -281,138 +186,326 @@ class App(tk.Tk):
             toolbar, text="Export XLSX", command=self._export_xlsx
         )
         self.xlsx_btn.pack(side="left", padx=4)
-
-        # openpyxl status indicator (green/red dot)
-        status = ttk.Frame(toolbar)
-        status.pack(side="left", padx=6)
-        self.dot = tk.Canvas(status, width=14, height=14, highlightthickness=0)
-        self.dot.pack(side="left")
+        self.dot = tk.Canvas(toolbar, width=14, height=14, highlightthickness=0)
+        self.dot.pack(side="left", padx=(6, 2))
         color = "#2ecc71" if HAVE_OPENPYXL else "#e74c3c"
         self.dot.create_oval(2, 2, 12, 12, fill=color, outline="")
-        msg = (
-            "openpyxl ready"
-            if HAVE_OPENPYXL
-            else "openpyxl not installed (XLSX off)"
-        )
-        self.status_lbl = ttk.Label(status, text=msg, foreground="#555")
-        self.status_lbl.pack(side="left", padx=4)
-
+        ttk.Label(
+            toolbar,
+            text="openpyxl ready" if HAVE_OPENPYXL else "no openpyxl (XLSX off)",
+            foreground="#555",
+        ).pack(side="left")
         if not HAVE_OPENPYXL:
             self.xlsx_btn.state(["disabled"])
 
-        # Tasks table
-        cols = [key for key, _ in TASK_FIELDS]
-        self.tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
-        for key, header in TASK_FIELDS:
-            self.tree.heading(key, text=header)
-            width = 160 if key in ("notes", "description", "blockers") else 110
-            self.tree.column(key, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, pady=8)
-        self.tree.bind("<Double-1>", lambda e: self._edit_task())
+        # Context label - which project the form is editing under.
+        self.context_var = tk.StringVar(value="No project selected.")
+        ttk.Label(
+            center, textvariable=self.context_var, font=("", 10, "italic"),
+            foreground="#336", padding=(0, 10)
+        ).pack(anchor="w")
 
-        yscroll = ttk.Scrollbar(right, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(xscroll=yscroll.set)
-        yscroll.pack(fill="x")
+        # --- Right: embedded task form -----------------------------------
+        form = ttk.LabelFrame(self, text="Task Details", padding=10)
+        form.pack(side="left", fill="y")
+        self._build_form(form)
 
-    # -- project actions --------------------------------------------------
-    def _current_project(self):
-        sel = self.project_list.curselection()
-        if not sel:
-            return None
-        return self.project_list.get(sel[0])
+    def _build_form(self, form):
+        pad = {"padx": 6, "pady": 3}
+        r = 0
 
-    def _refresh_projects(self):
-        self.project_list.delete(0, "end")
-        for name in sorted(self.store.projects):
-            self.project_list.insert("end", name)
-        if self.project_list.size():
-            self.project_list.selection_set(0)
-        self._refresh_tasks()
+        ttk.Label(form, text="Title *").grid(row=r, column=0, sticky="ne", **pad)
+        self.f_title = ttk.Entry(form, width=36)
+        self.f_title.grid(row=r, column=1, sticky="w", **pad)
+        r += 1
 
-    def _add_project(self):
-        name = SimplePrompt.ask(self, "New Project", "Project name:")
-        if not name:
-            return
-        if not self.store.add_project(name.strip()):
-            messagebox.showinfo("Exists", "A project with that name already exists.")
-            return
-        self._refresh_projects()
-        # select the new one
-        names = list(self.project_list.get(0, "end"))
-        if name.strip() in names:
-            self.project_list.selection_clear(0, "end")
-            self.project_list.selection_set(names.index(name.strip()))
-            self._refresh_tasks()
+        ttk.Label(form, text="Description").grid(row=r, column=0, sticky="ne", **pad)
+        self.f_desc = tk.Text(form, width=36, height=3, wrap="word")
+        self.f_desc.grid(row=r, column=1, sticky="w", **pad)
+        r += 1
 
-    def _delete_project(self):
-        name = self._current_project()
-        if not name:
-            return
-        if messagebox.askyesno(
-            "Delete project",
-            f"Delete project '{name}' and all its tasks?",
-        ):
-            self.store.delete_project(name)
-            self._refresh_projects()
+        ttk.Label(form, text="Due Date").grid(row=r, column=0, sticky="ne", **pad)
+        due_wrap = ttk.Frame(form)
+        due_wrap.grid(row=r, column=1, sticky="w", **pad)
+        self.f_due = ttk.Entry(due_wrap, width=20)
+        self.f_due.pack(side="left")
+        ttk.Label(due_wrap, text="e.g. 2026-10-12", foreground="#888").pack(
+            side="left", padx=6
+        )
+        r += 1
 
-    # -- task actions -----------------------------------------------------
-    def _refresh_tasks(self):
+        ttk.Label(form, text="Jira ticket made?").grid(
+            row=r, column=0, sticky="ne", **pad
+        )
+        self.f_jira_made = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            form, text="Yes", variable=self.f_jira_made, command=self._toggle_jira
+        ).grid(row=r, column=1, sticky="w", **pad)
+        r += 1
+
+        ttk.Label(form, text="Jira link / number").grid(
+            row=r, column=0, sticky="ne", **pad
+        )
+        self.f_jira_ref = ttk.Entry(form, width=36)
+        self.f_jira_ref.grid(row=r, column=1, sticky="w", **pad)
+        r += 1
+
+        ttk.Label(form, text="Blockers").grid(row=r, column=0, sticky="ne", **pad)
+        self.f_blockers = tk.Text(form, width=36, height=2, wrap="word")
+        self.f_blockers.grid(row=r, column=1, sticky="w", **pad)
+        r += 1
+
+        ttk.Label(form, text="Notes").grid(row=r, column=0, sticky="ne", **pad)
+        self.f_notes = tk.Text(form, width=36, height=4, wrap="word")
+        self.f_notes.grid(row=r, column=1, sticky="w", **pad)
+        r += 1
+
+        ttk.Label(form, text="Completed?").grid(row=r, column=0, sticky="ne", **pad)
+        self.f_completed = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            form, text="Mark complete (stamps date)", variable=self.f_completed
+        ).grid(row=r, column=1, sticky="w", **pad)
+        r += 1
+
+        self.f_added_lbl = ttk.Label(form, text="Added: -", foreground="#666")
+        self.f_added_lbl.grid(row=r, column=1, sticky="w", padx=6)
+        r += 1
+        self.f_completed_lbl = ttk.Label(form, text="Completed: -", foreground="#666")
+        self.f_completed_lbl.grid(row=r, column=1, sticky="w", padx=6)
+        r += 1
+
+        btnrow = ttk.Frame(form)
+        btnrow.grid(row=r, column=0, columnspan=2, pady=(10, 0))
+        self.save_btn = ttk.Button(btnrow, text="Save Task", command=self._save_task)
+        self.save_btn.pack(side="left", padx=4)
+        ttk.Button(btnrow, text="Clear / New", command=self._new_task).pack(
+            side="left", padx=4
+        )
+
+        self._added_date = ""
+        self._completed_date = ""
+        self._toggle_jira()
+        self._set_form_enabled(False)
+
+    # -- form helpers -----------------------------------------------------
+    def _toggle_jira(self):
+        state = "normal" if self.f_jira_made.get() else "disabled"
+        self.f_jira_ref.configure(state=state)
+
+    def _set_form_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for w in (self.f_title, self.f_due, self.f_desc, self.f_blockers, self.f_notes):
+            w.configure(state=state)
+        if enabled:
+            self._toggle_jira()
+        else:
+            self.f_jira_ref.configure(state="disabled")
+        self.save_btn.state(["!disabled"] if enabled else ["disabled"])
+
+    def _set_text(self, widget, value):
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", value)
+
+    def _clear_form(self):
+        self._set_form_enabled(True)
+        self.f_title.delete(0, "end")
+        self.f_due.delete(0, "end")
+        self.f_jira_ref.configure(state="normal")
+        self.f_jira_ref.delete(0, "end")
+        self._set_text(self.f_desc, "")
+        self._set_text(self.f_blockers, "")
+        self._set_text(self.f_notes, "")
+        self.f_jira_made.set(False)
+        self.f_completed.set(False)
+        self._added_date = ""
+        self._completed_date = ""
+        self.f_added_lbl.configure(text="Added: (on save)")
+        self.f_completed_lbl.configure(text="Completed: -")
+        self._toggle_jira()
+
+    def _load_task_into_form(self, task):
+        self._set_form_enabled(True)
+        self.f_title.delete(0, "end")
+        self.f_title.insert(0, task.get("title", ""))
+        self.f_due.delete(0, "end")
+        self.f_due.insert(0, task.get("due_date", ""))
+        self._set_text(self.f_desc, task.get("description", ""))
+        self._set_text(self.f_blockers, task.get("blockers", ""))
+        self._set_text(self.f_notes, task.get("notes", ""))
+        self.f_jira_made.set(task.get("jira_made", False))
+        self._toggle_jira()
+        self.f_jira_ref.configure(state="normal")
+        self.f_jira_ref.delete(0, "end")
+        self.f_jira_ref.insert(0, task.get("jira_ref", ""))
+        self._toggle_jira()
+        self._added_date = task.get("added_date", "")
+        self._completed_date = task.get("completed_date", "")
+        self.f_completed.set(bool(self._completed_date))
+        self.f_added_lbl.configure(text=f"Added: {self._added_date or '-'}")
+        self.f_completed_lbl.configure(text=f"Completed: {self._completed_date or '-'}")
+
+    # -- tree -------------------------------------------------------------
+    def _refresh_tree(self, select_item=None):
         self.tree.delete(*self.tree.get_children())
-        project = self._current_project()
-        if not project:
-            return
-        for i, task in enumerate(self.store.projects[project]):
-            values = []
-            for key, _ in TASK_FIELDS:
-                v = task.get(key, "")
-                if key == "jira_made":
-                    v = "Yes" if v else "No"
-                # keep table cells tidy
-                v = str(v).replace("\n", " ")
-                values.append(v)
-            self.tree.insert("", "end", iid=str(i), values=values)
+        self.node_meta = {}
+        for project in sorted(self.store.projects):
+            tasks = self.store.projects[project]
+            pid = self.tree.insert(
+                "", "end", text=f"\U0001F4C1 {project}  ({len(tasks)})",
+                open=True, tags=("project",)
+            )
+            self.node_meta[pid] = ("project", project)
+            for i, task in enumerate(tasks):
+                done = bool(task.get("completed_date"))
+                mark = "✓ " if done else "• "
+                label = mark + (task.get("title") or "(untitled)")
+                tid = self.tree.insert(
+                    pid, "end", text=label, tags=("done",) if done else ()
+                )
+                self.node_meta[tid] = ("task", project, i)
+        if select_item and select_item in self.node_meta:
+            self.tree.selection_set(select_item)
+            self.tree.see(select_item)
 
-    def _selected_task_index(self):
+    def _find_task_node(self, project, index):
+        for item, meta in self.node_meta.items():
+            if meta[0] == "task" and meta[1] == project and meta[2] == index:
+                return item
+        return None
+
+    def _find_project_node(self, project):
+        for item, meta in self.node_meta.items():
+            if meta[0] == "project" and meta[1] == project:
+                return item
+        return None
+
+    def _on_tree_select(self):
         sel = self.tree.selection()
         if not sel:
-            return None
-        return int(sel[0])
-
-    def _add_task(self):
-        project = self._current_project()
-        if not project:
-            messagebox.showinfo("No project", "Create or select a project first.")
             return
-        dlg = TaskDialog(self)
-        self.wait_window(dlg)
-        if dlg.result:
-            self.store.add_task(project, dlg.result)
-            self._refresh_tasks()
-
-    def _edit_task(self):
-        project = self._current_project()
-        idx = self._selected_task_index()
-        if project is None or idx is None:
+        meta = self.node_meta.get(sel[0])
+        if not meta:
             return
-        task = self.store.projects[project][idx]
-        dlg = TaskDialog(self, task)
-        self.wait_window(dlg)
-        if dlg.result:
-            self.store.update_task(project, idx, dlg.result)
-            self._refresh_tasks()
+        if meta[0] == "project":
+            self.active_project = meta[1]
+            self.editing_index = None
+            self._clear_form()
+            self.context_var.set(
+                f"Project: {self.active_project}  -  click 'New Task' to add one."
+            )
+        else:  # task
+            _, project, index = meta
+            self.active_project = project
+            self.editing_index = index
+            self._load_task_into_form(self.store.projects[project][index])
+            self.context_var.set(f"Editing task under project: {project}")
+
+    # -- project actions --------------------------------------------------
+    def _add_project(self):
+        name = self.project_entry.get().strip()
+        if not name:
+            return
+        if not self.store.add_project(name):
+            self._status(f"Project '{name}' already exists.")
+            return
+        self.project_entry.delete(0, "end")
+        self._refresh_tree()
+        pid = self._find_project_node(name)
+        if pid:
+            self.tree.selection_set(pid)
+        self._status(f"Added project '{name}'. Now click 'New Task' to add tasks.")
+
+    def _delete_project(self):
+        if not self.active_project:
+            self._status("Select a project first.")
+            return
+        name = self.active_project
+        if messagebox.askyesno(
+            "Delete project", f"Delete project '{name}' and all its tasks?"
+        ):
+            self.store.delete_project(name)
+            self.active_project = None
+            self.editing_index = None
+            self._set_form_enabled(False)
+            self.context_var.set("No project selected.")
+            self._refresh_tree()
+            self._status(f"Deleted project '{name}'.")
+
+    # -- task actions -----------------------------------------------------
+    def _new_task(self):
+        if not self.active_project:
+            self._status("Select a project in the list first, then click New Task.")
+            return
+        self.editing_index = None
+        self._clear_form()
+        self.context_var.set(f"New task under project: {self.active_project}")
+        self.f_title.focus_set()
+        self._status(f"Entering new task under '{self.active_project}'. Fill in + Save.")
+
+    def _save_task(self):
+        if not self.active_project:
+            self._status("Select a project first.")
+            return
+        project = self.active_project
+        title = self.f_title.get().strip()
+        if not title:
+            self._status("Title is required.")
+            self.f_title.focus_set()
+            return
+
+        completed = self.f_completed.get()
+        completed_date = (self._completed_date or now_stamp()) if completed else ""
+
+        task = {
+            "title": title,
+            "description": self.f_desc.get("1.0", "end").strip(),
+            "added_date": self._added_date or now_stamp(),
+            "due_date": self.f_due.get().strip(),
+            "completed_date": completed_date,
+            "jira_made": self.f_jira_made.get(),
+            "jira_ref": self.f_jira_ref.get().strip()
+            if self.f_jira_made.get()
+            else "",
+            "blockers": self.f_blockers.get("1.0", "end").strip(),
+            "notes": self.f_notes.get("1.0", "end").strip(),
+        }
+
+        if self.editing_index is None:
+            self.store.add_task(project, task)
+            self.editing_index = len(self.store.projects[project]) - 1
+            self._status(f"Added task '{title}' to project '{project}'.")
+        else:
+            self.store.update_task(project, self.editing_index, task)
+            self._status(f"Saved task '{title}'.")
+
+        self._refresh_tree(
+            select_item=None
+        )
+        node = self._find_task_node(project, self.editing_index)
+        if node:
+            self.tree.selection_set(node)
+            self.tree.see(node)
 
     def _delete_task(self):
-        project = self._current_project()
-        idx = self._selected_task_index()
-        if project is None or idx is None:
+        if self.active_project is None or self.editing_index is None:
+            self._status("Select a task to delete.")
             return
-        if messagebox.askyesno("Delete task", "Delete the selected task?"):
+        project = self.active_project
+        idx = self.editing_index
+        title = self.store.projects[project][idx].get("title", "")
+        if messagebox.askyesno("Delete task", f"Delete task '{title}'?"):
             self.store.delete_task(project, idx)
-            self._refresh_tasks()
+            self.editing_index = None
+            self._clear_form()
+            self._refresh_tree()
+            pid = self._find_project_node(project)
+            if pid:
+                self.tree.selection_set(pid)
+            self._status(f"Deleted task '{title}'.")
 
     # -- export -----------------------------------------------------------
     def _rows_for_export(self):
-        """Flatten all projects/tasks into header + rows."""
         headers = ["Project"] + [label for _, label in TASK_FIELDS]
         rows = []
         for project in sorted(self.store.projects):
@@ -436,22 +529,15 @@ class App(tk.Tk):
         )
         if not path:
             return
-        # csv.writer quotes fields containing commas/newlines automatically,
-        # so commas in notes are safe.
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, quoting=csv.QUOTE_ALL)
             writer.writerow(headers)
             writer.writerows(rows)
-        messagebox.showinfo("Exported", f"CSV saved to:\n{path}")
+        self._status(f"CSV exported to {path}")
 
     def _export_xlsx(self):
         if not HAVE_OPENPYXL:
-            messagebox.showwarning(
-                "openpyxl missing",
-                "XLSX export needs the 'openpyxl' package.\n\n"
-                "Install with: pip install openpyxl\n"
-                "(Use CSV export if you can't install packages.)",
-            )
+            self._status("openpyxl not installed - XLSX export unavailable. Use CSV.")
             return
         headers, rows = self._rows_for_export()
         path = filedialog.asksaveasfilename(
@@ -473,47 +559,16 @@ class App(tk.Tk):
             cell.fill = header_fill
         for row in rows:
             ws.append(row)
-        # reasonable column widths
         for col_idx, header in enumerate(headers, start=1):
             letter = openpyxl.utils.get_column_letter(col_idx)
             ws.column_dimensions[letter].width = max(14, min(40, len(header) + 6))
         ws.freeze_panes = "A2"
         wb.save(path)
-        messagebox.showinfo("Exported", f"XLSX saved to:\n{path}")
+        self._status(f"XLSX exported to {path}")
 
-
-# ---------------------------------------------------------------------------
-# Tiny modal text prompt (avoids simpledialog import quirks)
-# ---------------------------------------------------------------------------
-class SimplePrompt(tk.Toplevel):
-    def __init__(self, master, title, prompt):
-        super().__init__(master)
-        self.title(title)
-        self.resizable(False, False)
-        self.transient(master)
-        self.grab_set()
-        self.value = None
-
-        ttk.Label(self, text=prompt).pack(padx=12, pady=(12, 4))
-        self.entry = ttk.Entry(self, width=36)
-        self.entry.pack(padx=12, pady=4)
-        self.entry.focus_set()
-        self.entry.bind("<Return>", lambda e: self._ok())
-
-        btns = ttk.Frame(self)
-        btns.pack(pady=10)
-        ttk.Button(btns, text="OK", command=self._ok).pack(side="left", padx=6)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
-
-    def _ok(self):
-        self.value = self.entry.get()
-        self.destroy()
-
-    @classmethod
-    def ask(cls, master, title, prompt):
-        dlg = cls(master, title, prompt)
-        master.wait_window(dlg)
-        return dlg.value
+    # -- misc -------------------------------------------------------------
+    def _status(self, msg):
+        self.status_var.set(msg)
 
 
 def main():
