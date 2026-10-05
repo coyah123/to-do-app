@@ -10,3 +10,6 @@ todo-export.xlsx
 # Python
 __pycache__/
 *.pyc
+
+# Per-machine window state
+todo-settings.json
