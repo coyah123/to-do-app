@@ -449,7 +449,8 @@ def parse_jira_issues(text):
 
 # Task field <- ticket value that a Jira ticket fills in on your side.
 JIRA_SYNCED = (("epic", "epic"), ("sprint", "sprint"),
-               ("description", "description"), ("due_date", "due"))
+               ("description", "description"), ("due_date", "due"),
+               ("jira_ref", "key"))
 
 
 def jira_updates(task, issue, old_issue):
@@ -468,6 +469,8 @@ def jira_updates(task, issue, old_issue):
         current = (task.get(field) or "").strip()
         if value and value != current and (not current or current == (old.get(key) or "").strip()):
             updates[field] = value
+    if issue.get("key") and not task.get("jira_made"):
+        updates["jira_made"] = True  # "Ticket made" - it clearly exists
     resolved = issue.get("resolved", "")
     done_date = task.get("completed_date", "")
     if (resolved and task.get("status") == DONE and resolved != done_date
@@ -1734,6 +1737,21 @@ class App(tk.Tk):
     def _build_form(self, outer):
         self.form_tabs = ttk.Notebook(outer)
         self.form_tabs.pack(fill="both", expand=True)
+        # Quick links: the task's Jira ticket(s), one click away from any tab.
+        bg = ttk.Style(self).lookup("TFrame", "background") or "SystemButtonFace"
+        self.quick_links = tk.Text(outer, height=1, wrap="word", relief="flat",
+                                   borderwidth=0, highlightthickness=0, background=bg,
+                                   font=("", 9), cursor="arrow", padx=2, pady=4)
+        self.quick_links.pack(side="bottom", fill="x", before=self.form_tabs)
+        self.quick_links.tag_configure("label", foreground="#555", font=("", 9, "bold"))
+        self.quick_links.tag_configure("key", foreground="#1a5fb4", underline=True,
+                                       font=("", 9, "bold"))
+        self.quick_links.tag_configure("link", foreground="#1a5fb4", underline=True)
+        self.quick_links.tag_configure("dim", foreground="#888")
+        self.quick_links.configure(state="disabled")
+        self._ql_urls = {}  # tag -> url
+        self.quick_links.bind("<Button-1>", self._quick_link_click)
+        self.quick_links.bind("<Motion>", self._quick_link_hover)
         form = ttk.Frame(self.form_tabs, padding=(0, 4))
         fields_tab = ttk.Frame(self.form_tabs, padding=(4, 4))
         self.form_tabs.add(form, text="Details")
@@ -1896,10 +1914,13 @@ class App(tk.Tk):
             self.j_meta.configure(text="")
             v.insert("end", "No Jira ticket attached to this task.\n\n", "dim")
             v.insert("end", "In Jira use Export \u2192 XML, copy the XML and paste it below "
-                            "(or load the .xml file). It's kept here for reference - "
-                            "your task's own fields aren't changed.", "dim")
+                            "(or load the .xml file). The ticket is kept here for "
+                            "reference and fills in empty fields on your task (number, "
+                            "links, description, dates, epic, sprint) - anything you "
+                            "wrote yourself is kept.", "dim")
             v.configure(state="disabled")
             self.form_tabs.tab(2, text="Jira")
+            self._render_quick_links()
             return
         self.j_key.configure(text=j.get("key") or "Jira ticket")
         self.j_meta.configure(text=f"attached {j.get('attached', '')}")
@@ -1929,6 +1950,59 @@ class App(tk.Tk):
             v.insert("end", (c.get("body") or "") + "\n\n")
         v.configure(state="disabled")
         self.form_tabs.tab(2, text=f"Jira \u2713")
+        self._render_quick_links()
+
+    def _quick_link_at(self, event):
+        for tag in self.quick_links.tag_names(f"@{event.x},{event.y}"):
+            if tag in self._ql_urls:
+                return self._ql_urls[tag]
+        return None
+
+    def _quick_link_click(self, event):
+        url = self._quick_link_at(event)
+        if url:
+            self._open_link(url)
+        return "break"
+
+    def _quick_link_hover(self, event):
+        url = self._quick_link_at(event)
+        self.quick_links.configure(cursor="hand2" if url else "arrow")
+
+    def _render_quick_links(self):
+        """Bottom bar: the Jira ticket and its related Jira links, clickable."""
+        q = self.quick_links
+        q.configure(state="normal")
+        q.delete("1.0", "end")
+        self._ql_urls = {}
+        links = []  # (text, url, tag)
+        j = self._jira or {}
+        if j.get("url"):
+            links.append((j.get("key") or "Jira ticket", j["url"], "key"))
+            jira_urls = [l for l in j.get("links", []) if l["url"] != j["url"]
+                         and "/browse/" in l["url"]]
+            links += [(l["title"], l["url"], "link") for l in jira_urls]
+        else:
+            ref = self.f_jira_ref.get().strip() if self.f_jira_made.get() else ""
+            if ref.startswith(("http://", "https://")):
+                links.append((ref.rsplit("/", 1)[-1] or ref, ref, "key"))
+            elif ref:
+                q.insert("end", "Jira: ", "label")
+                q.insert("end", ref + "  (attach the ticket's XML to make it a link)", "dim")
+        if links:
+            q.insert("end", "Jira: ", "label")
+            for n, (text, url, tag) in enumerate(links):
+                if n:
+                    q.insert("end", "  \u00b7  ", "dim")
+                link_tag = f"ql{n}"
+                q.insert("end", text, (tag, link_tag))
+                self._ql_urls[link_tag] = url
+        # grow to fit (wrapped) content, up to 3 lines; hide when empty
+        lines = int(q.count("1.0", "end", "displaylines")[0]) if q.get("1.0", "end").strip() else 0
+        q.configure(height=max(1, min(3, lines)), state="disabled")
+        if lines:
+            q.pack(side="bottom", fill="x", before=self.form_tabs)
+        else:
+            q.pack_forget()
 
     def _jira_attach(self, text=None):
         """Attach (or refresh) the ticket from pasted XML. Task fields stay as they are."""
@@ -1956,6 +2030,8 @@ class App(tk.Tk):
             "description": self.f_desc.get("1.0", "end").strip(),
             "due_date": self.f_due.get().strip(), "status": self.f_status.get(),
             "completed_date": self._completed_date, "links": self._links,
+            "jira_made": self.f_jira_made.get(),
+            "jira_ref": self.f_jira_ref.get().strip() if self.f_jira_made.get() else "",
         }
         updates = jira_updates(current, issue, old)
         for kind in ("epic", "sprint"):
@@ -1967,6 +2043,13 @@ class App(tk.Tk):
                 self.f_kinds[kind].set(updates[kind])
         if "description" in updates:
             self._set_text(self.f_desc, updates["description"])
+        if "jira_made" in updates:
+            self.f_jira_made.set(True)
+            self._toggle_jira()
+        if "jira_ref" in updates:
+            self.f_jira_ref.configure(state="normal")
+            self._set_entry(self.f_jira_ref, updates["jira_ref"])
+            self._toggle_jira()
         if "due_date" in updates:
             self._set_entry(self.f_due, updates["due_date"])
         if "completed_date" in updates:
@@ -1981,7 +2064,8 @@ class App(tk.Tk):
 
         self._render_jira()
         labels = {"epic": "epic", "sprint": "sprint", "description": "description",
-                  "due_date": "due date", "completed_date": "completed date"}
+                  "due_date": "due date", "completed_date": "completed date",
+                  "jira_ref": "Jira ticket number"}
         filled = [labels[k] for k in updates if k in labels]
         if "links" in updates:
             n = len(updates["links"]) - len(current["links"])

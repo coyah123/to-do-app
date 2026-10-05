@@ -154,7 +154,7 @@ tabs.
 | **Status** | Dropdown with a colored badge. Choosing **Done** stamps the Completed date; moving off Done clears it. |
 | **Epic / Sprint / Subgroup** | Picked from the project's lists (blank = none). |
 | **Due** | Free text; use `YYYY-MM-DD` so sorting and overdue marks work. |
-| **Jira** | "Ticket made" checkbox + a box for the ticket number/link. |
+| **Jira** | "Ticket made" checkbox + a box for the ticket number/link. Filled in automatically from an attached ticket; the ticket and its Jira links also appear as clickable **quick links** at the bottom of the form. |
 | **Description, Blockers, Notes** | Free text; these boxes grow with the window. |
 | **Links** | Any number of links, each with a **title**, **description** and **URL**. The title is a hyperlink — click it to open in your browser (hover shows the URL in the status bar). Bare addresses like `example.com/page` get `https://` added. **edit** loads a link back for changes; **✕** removes it. On a saved task, link changes are stored immediately. |
 | **Created / Completed** | Stamped automatically from the system clock. |
@@ -296,6 +296,7 @@ isn't valid Jira XML, it stays in the box and the status bar says why.
 
 | Your field | From the ticket |
 |---|---|
+| **Jira (ticket made / number)** | "Ticket made" is ticked and the number is set to the ticket key, e.g. `MDA-12` |
 | **Epic / Sprint** | The ticket's epic and sprint (also added to the project's lists, so you can filter by them) |
 | **Description** | The Jira description (HTML converted to readable text) |
 | **Due** | Jira's due date |
@@ -305,7 +306,7 @@ isn't valid Jira XML, it stays in the box and the status bar says why.
 
 **Your edits always win:**
 
-- Epic, sprint, description and due date are filled in only when **your
+- Jira number, epic, sprint, description and due date are filled in only when **your
   field is empty**, or when it **still holds what the ticket put there
   last time** (so a refreshed ticket — e.g. a new due date — updates it).
   As soon as you type your own value, refreshing the ticket leaves it alone.
@@ -320,6 +321,13 @@ filled in description, due date, 8 links."*
 
 In the Jira tab, the **Sprint** and **Epic** values are links: click one to
 open the **Visual Planner filtered** to that sprint/epic in the project.
+
+**Quick links bar:** whenever a task has a Jira ticket, a bar at the
+**bottom of Task Details** (visible on every tab) shows the ticket key and
+its related Jira links — epic, parent, linked issues, subtasks — e.g.
+`Jira: MDA-12 · Epic MDA-3 · is blocked by MDA-9`. One click opens it in
+your browser. If you typed a full Jira URL into the Jira field yourself
+(without attaching XML), that shows there as a link too.
 
 ### Create tasks from a Jira export
 
