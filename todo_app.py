@@ -59,7 +59,7 @@ DONE = "Done"
 TASK_FIELDS = [
     ("title", "Title"),
     ("status", "Status"),
-    ("group", "Group"),
+    ("group", "Subgroup"),
     ("epic", "Epic"),
     ("sprint", "Sprint"),
     ("description", "Description"),
@@ -83,11 +83,18 @@ TABLE_COLS = [
     ("added_date", "Created", 110, False),
 ]
 
-GROUP_OPTIONS = ["None", "Group", "Epic", "Sprint", "Status"]
+GROUP_OPTIONS = ["None", "Subgroup", "Epic", "Sprint", "Status"]
 
 # Named per-project lists that tasks are assigned to. "group" is a plain
 # sub-folder of a project (e.g. an app), shown nested in the sidebar trees.
 GROUP_KINDS = ["group", "epic", "sprint"]
+# What each kind is called on screen ("group" shows as "Subgroup").
+KIND_LABEL = {"group": "Subgroup", "epic": "Epic", "sprint": "Sprint"}
+
+
+def kind_of(label):
+    """Map an on-screen label ("Subgroup", "Epic", "Status"...) to its task key."""
+    return {v: k for k, v in KIND_LABEL.items()}.get(label, label.lower())
 
 # Views, selectable from the View menu. Buddy is the default.
 VIEWS = ["Buddy", "Manager", "Visual Planner"]
@@ -109,7 +116,7 @@ ALL_SPRINTS = "All sprints"
 NO_SPRINT = "(no sprint)"
 
 # Visual Planner (Trello-style board).
-PLANNER_COLUMNS = ["Status", "Group", "Epic", "Sprint", "Project"]
+PLANNER_COLUMNS = ["Status", "Subgroup", "Epic", "Sprint", "Project"]
 PLANNER_ORDER = ["Manual", "Due date", "Created", "Title"]
 ANY = "All"
 NONE_LABEL = "(none)"
@@ -484,6 +491,8 @@ class App(tk.Tk):
             return var, cb
 
         self.p_columns, _ = combo("Columns", "columns", PLANNER_COLUMNS, "Status", 8)
+        if self.p_columns.get() not in PLANNER_COLUMNS:
+            self.p_columns.set("Status")
         self.p_project, self.p_project_cb = combo("Project", "project", [], ALL_PROJECTS, 16)
         self.p_epic, self.p_epic_cb = combo("Epic", "epic", [], ANY, 12)
         self.p_sprint, self.p_sprint_cb = combo("Sprint", "sprint", [], ANY, 12)
@@ -563,12 +572,12 @@ class App(tk.Tk):
                     if not (self.p_hide_done.get() and st == DONE)]
         if mode == "Project":
             return [(p, p) for p in scope]
-        kind = mode.lower()
-        return [("", f"No {kind}")] + [(n, n) for n in self._names_in(scope, kind)]
+        kind = kind_of(mode)
+        return [("", f"No {mode.lower()}")] + [(n, n) for n in self._names_in(scope, kind)]
 
     def _card_value(self, project, task):
         mode = self.p_columns.get()
-        return project if mode == "Project" else task.get(mode.lower(), "")
+        return project if mode == "Project" else task.get(kind_of(mode), "")
 
     def _card_sort_key(self, task):
         order = self.p_order.get()
@@ -676,7 +685,7 @@ class App(tk.Tk):
         meta = []
         if show_project and mode != "Project":
             meta.append(project)
-        if task.get("group") and mode != "Group":
+        if task.get("group") and mode != "Subgroup":
             meta.append("\u25a3 " + task["group"])
         if task.get("epic") and mode != "Epic":
             meta.append("\u25c6 " + task["epic"])
@@ -720,8 +729,8 @@ class App(tk.Tk):
         if mode == "Status":
             self.f_status.set(value)
             self._on_status_change()
-        elif mode.lower() in GROUP_KINDS and value:
-            kind = mode.lower()
+        elif kind_of(mode) in GROUP_KINDS and value:
+            kind = kind_of(mode)
             if value not in self.store.names(project, kind):
                 self.store.add_name(project, kind, value)
                 self._refresh_choices()
@@ -845,8 +854,8 @@ class App(tk.Tk):
 
         if mode == "Status":
             set_status(task, value)
-        elif mode.lower() in GROUP_KINDS:
-            task[mode.lower()] = value
+        elif kind_of(mode) in GROUP_KINDS:
+            task[kind_of(mode)] = value
 
         dest = value if mode == "Project" else project
         self._relocate_task(project, index, task, dest)
@@ -1180,17 +1189,26 @@ class App(tk.Tk):
             anchor="w"
         )
 
+        # One add box: a new project when nothing is selected, otherwise a
+        # new subgroup inside the selected project.
+        mode_row = ttk.Frame(left)
+        mode_row.pack(fill="x", pady=(4, 0))
+        self.add_mode_lbl = ttk.Label(mode_row, text="New project", foreground="#555",
+                                      font=("", 8))
+        self.add_mode_lbl.pack(side="left")
+        self.add_switch = ttk.Label(mode_row, text="new project instead",
+                                    style="LinkAction.TLabel", cursor="hand2")
+        self.add_switch.bind("<Button-1>", lambda e: self._clear_tree_selection())
+
         add_row = ttk.Frame(left)
-        add_row.pack(fill="x", pady=4)
+        add_row.pack(fill="x", pady=(1, 4))
         self.project_entry = ttk.Entry(add_row, width=18)
         self.project_entry.pack(side="left", fill="x", expand=True)
-        self.project_entry.bind("<Return>", lambda e: self._add_project())
-        ttk.Button(add_row, text="+ Project", width=9, command=self._add_project).pack(
-            side="left", padx=(4, 0)
-        )
-        ttk.Button(add_row, text="+ Group", width=8, command=self._add_group).pack(
-            side="left", padx=(2, 0)
-        )
+        self.project_entry.bind("<Return>", lambda e: self._add_from_box())
+        self.project_entry.bind("<Escape>", lambda e: self._clear_tree_selection())
+        self.add_btn = ttk.Button(add_row, text="+ Project", width=11,
+                                  command=self._add_from_box)
+        self.add_btn.pack(side="left", padx=(4, 0))
 
         btns = ttk.Frame(left)
         btns.pack(side="bottom", fill="x", pady=(4, 0))
@@ -1214,13 +1232,14 @@ class App(tk.Tk):
         yscroll.pack(side="left", fill="y")
         self.tree.configure(yscrollcommand=yscroll.set)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_tree_select())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_add_mode(), add="+")
         # Drag tasks onto a group / project / other task to regroup them.
         self.tree.bind("<ButtonPress-1>", self._tree_press, add="+")
         self.tree.bind("<B1-Motion>", self._tree_motion, add="+")
         self.tree.bind("<ButtonRelease-1>", self._tree_release, add="+")
         self._tdrag = None
         self.tree.tag_configure("drop", background="#cfe0fb")
-        self.tree.tag_configure("group", font=("", 9, "bold"), foreground="#335")
+        self.tree.tag_configure("group", font=("", 9, "italic"), foreground="#446")
         self.tree.tag_configure("project", font=("", 10, "bold"))
         for color, tag in STATUSES.values():
             self.tree.tag_configure(tag, foreground=color)
@@ -1251,7 +1270,7 @@ class App(tk.Tk):
         tasks_tab = ttk.Frame(self.notebook, padding=4)
         groups_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(tasks_tab, text="Tasks")
-        self.notebook.add(groups_tab, text="Groups, Epics & Sprints")
+        self.notebook.add(groups_tab, text="Subgroups, Epics & Sprints")
         self._build_groups_tab(groups_tab)
         center = tasks_tab
 
@@ -1309,7 +1328,7 @@ class App(tk.Tk):
         # kind -> (listing treeview, name entry)
         self.g_widgets = {}
         for c, kind in enumerate(GROUP_KINDS):
-            box = ttk.LabelFrame(cols, text=kind.title() + "s", padding=6)
+            box = ttk.LabelFrame(cols, text=KIND_LABEL[kind] + "s", padding=6)
             box.grid(row=0, column=c, sticky="nsew", padx=(0 if c == 0 else 4, 0))
 
             entry_row = ttk.Frame(box)
@@ -1369,7 +1388,7 @@ class App(tk.Tk):
         self.f_sprint.grid(row=r, column=3, sticky="ew", **pad)
         r += 1
 
-        ttk.Label(form, text="Group").grid(row=r, column=0, sticky="e", **pad)
+        ttk.Label(form, text="Subgroup").grid(row=r, column=0, sticky="e", **pad)
         self.f_group = ttk.Combobox(form, width=12)
         self.f_group.grid(row=r, column=1, sticky="ew", **pad)
         ttk.Label(form, text="Due").grid(row=r, column=2, sticky="e", **pad)
@@ -1667,7 +1686,11 @@ class App(tk.Tk):
                 self.node_meta[tid] = ("task", project, i)
 
     def _tree_press(self, event):
-        meta = self.node_meta.get(self.tree.identify_row(event.y))
+        row = self.tree.identify_row(event.y)
+        if not row:  # empty space: back to "new project"
+            self._clear_tree_selection()
+            return
+        meta = self.node_meta.get(row)
         self._tdrag = None
         if meta and meta[0] == "task":
             self._tdrag = {"key": meta[1:], "x": event.x, "y": event.y,
@@ -1721,7 +1744,7 @@ class App(tk.Tk):
         task["group"] = group
         self._relocate_task(project, index, task, dest)
         self._refresh_views()
-        where = f"group '{group}'" if group else "no group"
+        where = f"subgroup '{group}'" if group else "no subgroup"
         self._status(f"Moved '{task.get('title', '')}' to {dest} / {where}.")
         return "break"
 
@@ -1766,7 +1789,7 @@ class App(tk.Tk):
                 self._insert_row("", i, t)
             return
 
-        key = group.lower()
+        key = kind_of(group)
         groups = {}
         for i, t in items:
             groups.setdefault(t.get(key) or "", []).append((i, t))
@@ -1779,7 +1802,7 @@ class App(tk.Tk):
             if "" in groups:
                 names.append("")
         for name in names:
-            label = name or f"(no {key})"
+            label = name or f"(no {group.lower()})"
             gid = self.table.insert(
                 "", "end", text=f"{label}  ({len(groups[name])})",
                 open=True, tags=("group",),
@@ -1834,6 +1857,7 @@ class App(tk.Tk):
             else:
                 self.table.selection_remove(self.table.selection())
             self._highlight_cards()
+            self._update_add_mode()
         finally:
             # Selection events are delivered after this returns.
             self.after_idle(self._end_sync)
@@ -1899,47 +1923,47 @@ class App(tk.Tk):
         if not name:
             return
         if not self.store.add_name(self.active_project, kind, name):
-            self._status(f"{kind.title()} '{name}' already exists.")
+            self._status(f"{KIND_LABEL[kind]} '{name}' already exists.")
             return
         entry.delete(0, "end")
         self._group_changed(kind, None, None)
         lst.selection_set(name)
-        self._status(f"Added {kind} '{name}' to '{self.active_project}'.")
+        self._status(f"Added {KIND_LABEL[kind].lower()} '{name}' to '{self.active_project}'.")
 
     def _group_rename(self, kind):
         lst, entry = self.g_widgets[kind]
         sel = lst.selection()
         new = entry.get().strip()
         if not sel:
-            self._status(f"Select the {kind} to rename, edit its name, then Rename.")
+            self._status(f"Select the {KIND_LABEL[kind].lower()} to rename, edit its name, then Rename.")
             return
         old = sel[0]
         if not new or new == old:
             return
         if not self.store.rename_name(self.active_project, kind, old, new):
-            self._status(f"{kind.title()} '{new}' already exists.")
+            self._status(f"{KIND_LABEL[kind]} '{new}' already exists.")
             return
         self._group_changed(kind, old, new)
         lst.selection_set(new)
-        self._status(f"Renamed {kind} '{old}' to '{new}'.")
+        self._status(f"Renamed {KIND_LABEL[kind].lower()} '{old}' to '{new}'.")
 
     def _group_delete(self, kind):
         lst, entry = self.g_widgets[kind]
         sel = lst.selection()
         if not sel:
-            self._status(f"Select the {kind} to delete.")
+            self._status(f"Select the {KIND_LABEL[kind].lower()} to delete.")
             return
         name = sel[0]
         used = self.store.usage(self.active_project, kind, name)
-        msg = f"Delete {kind} '{name}'?"
+        msg = f"Delete {KIND_LABEL[kind].lower()} '{name}'?"
         if used:
-            msg += f"\n\n{used} task(s) will be left with no {kind}."
-        if not messagebox.askyesno(f"Delete {kind}", msg):
+            msg += f"\n\n{used} task(s) will be left with no {KIND_LABEL[kind].lower()}."
+        if not messagebox.askyesno(f"Delete {KIND_LABEL[kind].lower()}", msg):
             return
         self.store.delete_name(self.active_project, kind, name)
         entry.delete(0, "end")
         self._group_changed(kind, name, "")
-        self._status(f"Deleted {kind} '{name}'.")
+        self._status(f"Deleted {KIND_LABEL[kind].lower()} '{name}'.")
 
     def _select_project(self, project):
         changed = project != self.active_project
@@ -1974,7 +1998,7 @@ class App(tk.Tk):
         elif meta[0] == "group":
             self._select_project(meta[1])
             self.f_group.set(meta[2])  # a new task starts in this group
-            self._status(f"Group '{meta[2]}' - 'New Task' adds to it; drag tasks here.")
+            self._status(f"Subgroup '{meta[2]}' - 'New Task' adds to it; drag tasks here.")
         else:
             self._select_task(meta[1], meta[2])
 
@@ -2000,19 +2024,49 @@ class App(tk.Tk):
         self._refresh_views()
         self._status(f"Added project '{name}'. Now click 'New Task' to add tasks.")
 
+    def _add_target(self):
+        """Project the add box creates a subgroup in (None = new project)."""
+        sel = self.tree.selection()
+        meta = self.node_meta.get(sel[0]) if sel else None
+        return meta[1] if meta else None
+
+    def _update_add_mode(self):
+        project = self._add_target()
+        if project:
+            self.add_mode_lbl.configure(text=f"New subgroup in '{project}'")
+            self.add_btn.configure(text="+ Subgroup")
+            self.add_switch.pack(side="right")
+        else:
+            self.add_mode_lbl.configure(text="New project")
+            self.add_btn.configure(text="+ Project")
+            self.add_switch.pack_forget()
+
+    def _clear_tree_selection(self):
+        self._syncing = True  # deselect only; keep the form as it is
+        self.tree.selection_remove(self.tree.selection())
+        self.after_idle(self._end_sync)
+        self._update_add_mode()
+        self.project_entry.focus_set()
+
+    def _add_from_box(self):
+        if self._add_target():
+            self._add_group()
+        else:
+            self._add_project()
+
     def _add_group(self):
         name = self.project_entry.get().strip()
-        project = self.active_project
+        project = self._add_target()
         if not project:
-            self._status("Select a project, type a group name, then '+ Group'.")
             return
         if not name:
-            self._status("Type a group name in the box, then '+ Group'.")
+            self._status(f"Type a subgroup name, then '+ Subgroup' to add it to '{project}'.")
             self.project_entry.focus_set()
             return
         if not self.store.add_name(project, "group", name):
-            self._status(f"Group '{name}' already exists in '{project}'.")
+            self._status(f"Subgroup '{name}' already exists in '{project}'.")
             return
+        self.active_project = project
         self.project_entry.delete(0, "end")
         # Same as clicking the new group: form ready for a task in it.
         self.editing_index = None
@@ -2025,7 +2079,8 @@ class App(tk.Tk):
                 self.tree.selection_set(item)
                 self.tree.see(item)
                 self.after_idle(self._end_sync)
-        self._status(f"Added group '{name}' to '{project}'. Drag tasks onto it.")
+        self._update_add_mode()
+        self._status(f"Added subgroup '{name}' to '{project}'. Drag tasks onto it.")
 
     def _delete_project(self):
         if not self.active_project:
