@@ -83,12 +83,11 @@ each view remembers its own window size/position.
 ## Custom fields
 
 Each task has a **Fields** tab next to **Details** for extra data that
-doesn't fit the standard fields — e.g. Priority, Assignee, Story Points.
+doesn't fit the standard fields — e.g. Priority, Customer, Story Points.
 Pick an existing field from the box at the bottom (or type a new name) and
-click **Add field**; a new name becomes available on every task. Jira
-imports and shared tasks create any fields you don't have yet, so nothing
-from the source is lost. Custom fields get their own columns in CSV/XLSX
-exports.
+click **Add field**; a new name becomes available on every task. Shared
+tasks from a coworker create any fields you don't have yet. Custom fields
+get their own columns in CSV/XLSX exports.
 
 ## Sharing tasks with coworkers
 
@@ -107,26 +106,47 @@ Every task carries a hidden ID, so if you send an updated version of
 something they already imported, they're asked whether to replace their
 copy or keep it.
 
-## Importing from Jira
+## Jira tickets
 
-In Jira, open an issue (or a search/filter of issues) and use
-**Export → XML**. Then choose **File → Import Jira XML…** (the regular
-import picker accepts `.xml` too). Each issue becomes a task in the selected
-project — or, if none is selected, a project named after the Jira project:
+A Jira ticket is **attached to a task for reference — it never overwrites
+your task.** The only things from a ticket that enter your own data are its
+**epic** and **sprint**, so you can filter by them.
 
-| Jira | Task |
-|---|---|
-| Summary | Title |
-| Description | Description (HTML converted to plain text) |
-| Status | Status (Done / In Progress / Blocked / Waiting for approval / Not started) |
-| Key + URL | Jira ticket made, Jira ref, and a clickable link |
-| Due / Resolved | Due date / Completed date |
-| Sprint, Epic Link | Sprint, Epic |
-| "is blocked by" links | Blockers |
-| Everything else (type, priority, assignee, reporter, labels, components, versions, story points, Jira dates, subtasks, comments, any custom field) | **Custom fields** — created automatically if you don't have them yet |
+**Attach a ticket to a task**
 
-Imported tasks show **From: Jira**; re-importing the same issue asks
-whether to replace your copy.
+1. In Jira, open the issue and use **Export → XML**; copy the XML (or save
+   the `.xml` file).
+2. In the app, click your task and open the **Jira** tab in Task Details.
+3. Paste the XML into the box and press **Ctrl+Enter** or **Attach** (or
+   **Load .xml file…**). **Save** also attaches anything left in the box.
+
+The Jira tab then shows the ticket read-only: the key (click it to open the
+ticket in your browser), status, type, priority, assignee, reporter, dates,
+labels, components, versions, linked issues, any Jira custom fields, the
+Jira description and the comments. Paste a newer export any time to refresh
+it; **Remove** detaches it. The tab reads **Jira ✓** when a ticket is
+attached.
+
+**What it does to your data — only epic and sprint**
+
+- The ticket's epic and sprint are added to the project's epic/sprint lists.
+- If your task has no epic/sprint yet, it takes the ticket's. If you've set
+  your own, yours is kept. (If the value originally came from the ticket and
+  the ticket later moves to a new sprint, refreshing follows it.)
+- Your title, description, status, dates, notes, links and custom fields are
+  never touched.
+- In the Jira tab, the **Sprint** and **Epic** values are links: click one to
+  open the Visual Planner filtered to that sprint/epic in the project.
+
+**Create tasks from a Jira export**
+
+**File → Import Jira XML…** (the regular **Import…** picker accepts `.xml`
+too) creates a task per issue — one ticket or a whole search export — in the
+selected project, or a project named after the Jira project if none is
+selected. New tasks get only the title, epic and sprint; the full ticket is
+attached in the Jira tab. Tickets you already have as tasks aren't
+duplicated or overwritten — only their attached copy (and Jira-sourced
+epic/sprint) is refreshed.
 
 ## Data & privacy
 

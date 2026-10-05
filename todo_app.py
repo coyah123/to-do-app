@@ -250,19 +250,18 @@ def jira_status(name, category):
     return DEFAULT_STATUS
 
 
-# Jira fields that always get a multi-line box when first created.
-JIRA_LONG_FIELDS = [{"name": "Comments", "type": "long"},
-                    {"name": "Environment", "type": "long"}]
+def parse_jira_issues(text):
+    """Parse a Jira XML export into issue snapshots (plain dicts).
 
-
-def parse_jira_xml(text):
-    """Turn a Jira XML export into (jira project name, task dict) pairs."""
+    A snapshot is a read-only copy of the ticket that gets attached to a task
+    (task["jira"]) and shown in the form's Jira tab - it never overwrites
+    the task's own fields."""
     root = ET.fromstring(text)
     items = root.findall(".//item")
     if not items:
-        raise ValueError("No Jira issues (<item>) found in that file.")
+        raise ValueError("No Jira issues (<item>) found in that XML.")
 
-    out = []
+    issues = []
     for item in items:
         def get(tag):
             el = item.find(tag)
@@ -272,13 +271,10 @@ def parse_jira_xml(text):
             return [(e.text or "").strip() for e in item.findall(path) if (e.text or "").strip()]
 
         key = get("key")
-        status_el = item.find("statuscategory")
-        if status_el is None:
-            status_el = item.find("statusCategory")
-        category = status_el.get("key", "") if status_el is not None else ""
-        status = jira_status(get("status"), category)
+        cat_el = item.find("statusCategory")
+        if cat_el is None:
+            cat_el = item.find("statuscategory")
 
-        # Custom fields: Sprint, Epic Link, Story Points, ...
         custom = {}
         for cf in item.findall("customfields/customfield"):
             name = (cf.findtext("customfieldname") or "").strip()
@@ -296,69 +292,86 @@ def parse_jira_xml(text):
         if not epic and item.find("parent") is not None and get("type").lower() not in ("sub-task", "subtask"):
             epic = get("parent")
 
-        # "is blocked by" links become Blockers.
-        blockers = []
+        links = []
         for lt in item.findall("issuelinks/issuelinktype"):
             for direction in lt:
                 desc = direction.get("description", "")
-                if "blocked by" in desc.lower():
-                    for k in direction.findall("issuelink/issuekey"):
-                        blockers.append(f"{desc} {(k.text or '').strip()}")
+                for k in direction.findall("issuelink/issuekey"):
+                    links.append(f"{desc} {(k.text or '').strip()}".strip())
 
-        title = get("summary") or re.sub(r"^\[[^\]]+\]\s*", "", get("title")) or key or "(untitled)"
-        link = get("link")
-
-        # Everything without a home in the standard fields becomes a custom
-        # field (created on import if this profile doesn't have it yet).
         fields = {}
         for label, value in (
-            ("Type", get("type")), ("Priority", get("priority")),
-            ("Jira status", get("status")), ("Resolution", get("resolution")),
-            ("Assignee", get("assignee")), ("Reporter", get("reporter")),
             ("Labels", ", ".join(all_text("labels/label"))),
             ("Components", ", ".join(all_text("component"))),
             ("Fix versions", ", ".join(all_text("fixVersion"))),
             ("Affects versions", ", ".join(all_text("version"))),
             ("Environment", html_to_text(get("environment"))),
-            ("Created in Jira", jira_date(get("created"), True)),
-            ("Updated in Jira", jira_date(get("updated"), True)),
             ("Parent", get("parent")),
             ("Subtasks", ", ".join(all_text("subtasks/subtask"))),
+            ("Linked issues", "\n".join(links)),
         ):
-            if value and value.lower() not in ("unresolved", "unassigned", "none"):
+            if value:
                 fields[label] = value
         for name, values in custom.items():
             if name not in ("Sprint", "Epic Link", "Parent Link", "Rank"):
                 fields[name] = ", ".join(values)
-        comments = []
-        for c in item.findall("comments/comment"):
-            who = c.get("author", "")
-            when = jira_date(c.get("created", ""), True)
-            body = html_to_text(c.text or "")
-            comments.append(f"{who} ({when}): {body}" if who or when else body)
-        if comments:
-            fields["Comments"] = "\n\n".join(comments)
 
-        task = new_task(title)
-        task.update(
-            id=f"jira:{key}" if key else task["id"],
-            status=status,
-            epic=epic,
-            sprint=sprint,
-            description=html_to_text(get("description")),
-            due_date=jira_date(get("due")),
-            completed_date=jira_date(get("resolved"), True) if status == DONE else "",
-            jira_made=bool(key),
-            jira_ref=key,
-            blockers="\n".join(blockers),
-            fields=fields,
-            links=[{"title": key or "Jira ticket", "description": "Jira ticket",
-                    "url": link}] if link else [],
-        )
         project_el = item.find("project")
         project = (project_el.text or "").strip() if project_el is not None else ""
-        out.append((project or (key.split("-")[0] if "-" in key else "Jira"), task))
-    return out
+        issues.append({
+            "key": key,
+            "url": get("link"),
+            "project": project or (key.split("-")[0] if "-" in key else "Jira"),
+            "summary": get("summary") or re.sub(r"^\[[^\]]+\]\s*", "", get("title")) or key,
+            "status": get("status"),
+            "status_category": cat_el.get("key", "") if cat_el is not None else "",
+            "type": get("type"),
+            "priority": get("priority"),
+            "resolution": get("resolution"),
+            "assignee": get("assignee"),
+            "reporter": get("reporter"),
+            "created": jira_date(get("created"), True),
+            "updated": jira_date(get("updated"), True),
+            "due": jira_date(get("due")),
+            "resolved": jira_date(get("resolved"), True),
+            "sprint": sprint,
+            "epic": epic,
+            "blocked_by": [l for l in links if "blocked by" in l.lower()],
+            "description": html_to_text(get("description")),
+            "fields": fields,
+            "comments": [{"author": c.get("author", ""),
+                          "created": jira_date(c.get("created", ""), True),
+                          "body": html_to_text(c.text or "")}
+                         for c in item.findall("comments/comment")],
+            "attached": now_stamp(),
+        })
+    return issues
+
+
+def jira_task(issue):
+    """A new task from a Jira issue. Only the title, epic and sprint come
+    into your data; the full ticket rides along in task["jira"] (read-only,
+    shown in the form's Jira tab)."""
+    task = new_task(issue["summary"] or issue["key"] or "(untitled)")
+    task.update(
+        id=f"jira:{issue['key']}" if issue["key"] else task["id"],
+        epic=issue["epic"],
+        sprint=issue["sprint"],
+        jira=issue,
+    )
+    return task
+
+
+def jira_list_updates(task, issue, old_issue):
+    """Epic/sprint values to take from a (re)attached ticket. A task's own
+    value wins unless it's empty or still the value the old ticket gave it."""
+    updates = {}
+    for kind in ("epic", "sprint"):
+        value = issue.get(kind, "")
+        current = task.get(kind, "")
+        if value and (not current or current == (old_issue or {}).get(kind)):
+            updates[kind] = value
+    return updates
 
 
 def set_status(task, status):
@@ -1607,6 +1620,8 @@ class App(tk.Tk):
         fields_tab = ttk.Frame(self.form_tabs, padding=(4, 4))
         self.form_tabs.add(form, text="Details")
         self.form_tabs.add(fields_tab, text="Fields")
+        jira_tab = ttk.Frame(self.form_tabs, padding=(4, 4))
+        self.form_tabs.add(jira_tab, text="Jira")
         pad = {"padx": 4, "pady": 3}
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
@@ -1696,11 +1711,193 @@ class App(tk.Tk):
         )
 
         self._build_fields_tab(fields_tab)
+        self._build_jira_tab(jira_tab)
         self._added_date = ""
         self._completed_date = ""
         self._update_status_pill()
         self._toggle_jira()
         self._set_form_enabled(False)
+
+    # -- Jira tab: a read-only copy of the ticket, attached to the task ----
+    def _build_jira_tab(self, tab):
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        head = ttk.Frame(tab)
+        head.grid(row=0, column=0, sticky="ew")
+        self.j_key = ttk.Label(head, text="", style="Link.TLabel", cursor="hand2",
+                               font=("", 10, "bold", "underline"))
+        self.j_key.pack(side="left")
+        self.j_key.bind("<Button-1>", lambda e: self._jira and self._jira.get("url")
+                        and self._open_link(self._jira["url"]))
+        self.j_meta = ttk.Label(head, text="", foreground="#666", font=("", 8))
+        self.j_meta.pack(side="left", padx=(8, 0))
+
+        view_wrap = ttk.Frame(tab)
+        view_wrap.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        self.j_view = tk.Text(view_wrap, wrap="word", width=40, height=12, font=("", 9),
+                              relief="flat", padx=6, pady=4, background="#f6f8fa")
+        ys = ttk.Scrollbar(view_wrap, orient="vertical", command=self.j_view.yview)
+        self.j_view.configure(yscrollcommand=ys.set)
+        ys.pack(side="right", fill="y")
+        self.j_view.pack(side="left", fill="both", expand=True)
+        self.j_view.tag_configure("h", font=("", 9, "bold"), foreground="#1a5fb4",
+                                  spacing1=8, spacing3=2)
+        self.j_view.tag_configure("k", font=("", 9, "bold"), foreground="#444")
+        self.j_view.tag_configure("dim", foreground="#888")
+        # Sprint / epic values: click to see everything in that sprint/epic.
+        self.j_view.tag_configure("filter", foreground="#1a5fb4", underline=True)
+        for kind in ("sprint", "epic"):
+            tag = "filter_" + kind
+            self.j_view.tag_bind(tag, "<Button-1>",
+                                 lambda e, k=kind: self._jira and self._filter_by(k, self._jira.get(k)))
+            self.j_view.tag_bind(tag, "<Enter>", lambda e: self.j_view.configure(cursor="hand2"))
+            self.j_view.tag_bind(tag, "<Leave>", lambda e: self.j_view.configure(cursor=""))
+
+        paste = ttk.LabelFrame(tab, text="Paste Jira XML (Ctrl+Enter to attach)", padding=4)
+        paste.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        paste.columnconfigure(0, weight=1)
+        self.j_paste = tk.Text(paste, height=3, width=40, wrap="none", font=("Consolas", 8))
+        self.j_paste.grid(row=0, column=0, columnspan=4, sticky="ew")
+        self.j_paste.bind("<Control-Return>", lambda e: (self._jira_attach(), "break")[1])
+        self.j_attach_btn = ttk.Button(paste, text="Attach", command=self._jira_attach)
+        self.j_attach_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.j_file_btn = ttk.Button(paste, text="Load .xml file\u2026", command=self._jira_attach_file)
+        self.j_file_btn.grid(row=1, column=1, padx=(4, 0), pady=(4, 0))
+        self.j_remove_btn = ttk.Button(paste, text="Remove", command=self._jira_remove)
+        self.j_remove_btn.grid(row=1, column=3, padx=(4, 0), pady=(4, 0))
+        self._jira = None
+
+    def _render_jira(self):
+        v, j = self.j_view, self._jira
+        v.configure(state="normal")
+        v.delete("1.0", "end")
+        has = bool(j)
+        self.j_remove_btn.state(["!disabled"] if has else ["disabled"])
+        if not j:
+            self.j_key.configure(text="")
+            self.j_meta.configure(text="")
+            v.insert("end", "No Jira ticket attached to this task.\n\n", "dim")
+            v.insert("end", "In Jira use Export \u2192 XML, copy the XML and paste it below "
+                            "(or load the .xml file). It's kept here for reference - "
+                            "your task's own fields aren't changed.", "dim")
+            v.configure(state="disabled")
+            self.form_tabs.tab(2, text="Jira")
+            return
+        self.j_key.configure(text=j.get("key") or "Jira ticket")
+        self.j_meta.configure(text=f"attached {j.get('attached', '')}")
+        v.insert("end", (j.get("summary") or "") + "\n", "h")
+        for label, key in (("Status", "status"), ("Type", "type"), ("Priority", "priority"),
+                           ("Resolution", "resolution"), ("Assignee", "assignee"),
+                           ("Reporter", "reporter"), ("Sprint", "sprint"), ("Epic", "epic"),
+                           ("Due", "due"), ("Created", "created"), ("Updated", "updated"),
+                           ("Resolved", "resolved")):
+            if j.get(key):
+                v.insert("end", f"{label}: ", "k")
+                if key in ("sprint", "epic"):
+                    v.insert("end", j[key], ("filter", "filter_" + key))
+                    v.insert("end", "  (click to filter)" + "\n", "dim")
+                else:
+                    v.insert("end", j[key] + "\n")
+        for name, value in j.get("fields", {}).items():
+            v.insert("end", f"{name}: ", "k")
+            v.insert("end", value + "\n")
+        v.insert("end", "Description\n", "h")
+        v.insert("end", (j.get("description") or "(none)") + "\n",
+                 () if j.get("description") else "dim")
+        comments = j.get("comments", [])
+        v.insert("end", f"Comments ({len(comments)})\n", "h")
+        for c in comments:
+            v.insert("end", f"{c.get('author', '')}  {c.get('created', '')}\n", "k")
+            v.insert("end", (c.get("body") or "") + "\n\n")
+        v.configure(state="disabled")
+        self.form_tabs.tab(2, text=f"Jira \u2713")
+
+    def _jira_attach(self, text=None):
+        """Attach (or refresh) the ticket from pasted XML. Task fields stay as they are."""
+        text = text if text is not None else self.j_paste.get("1.0", "end").strip()
+        if not text:
+            self._status("Paste the Jira XML (Export > XML) into the box first.")
+            self.j_paste.focus_set()
+            return False
+        try:
+            issues = parse_jira_issues(text)
+        except (ValueError, ET.ParseError) as exc:
+            self._status(f"That isn't Jira XML I can read: {exc}")
+            return False
+        # Prefer the issue matching this task's Jira ref when several were pasted.
+        ref = (self._jira or {}).get("key") or self.f_jira_ref.get().strip()
+        issue = next((i for i in issues if i["key"] == ref), issues[0])
+        old, self._jira = self._jira, issue
+        self.j_paste.delete("1.0", "end")
+
+        # The ticket's epic/sprint are the only things that enter your data.
+        project = self.active_project
+        current = {kind: self.f_kinds[kind].get().strip() for kind in ("epic", "sprint")}
+        updates = jira_list_updates(current, issue, old)
+        for kind in ("epic", "sprint"):
+            if issue.get(kind) and issue[kind] not in self.store.names(project, kind):
+                self.store.add_name(project, kind, issue[kind])
+        self._refresh_choices()
+        for kind, value in updates.items():
+            self.f_kinds[kind].set(value)
+        if updates and self.editing_index is not None:
+            self.store.projects[project][self.editing_index].update(updates)
+
+        self._render_jira()
+        added = ", ".join(f"{k} '{v}'" for k, v in updates.items())
+        self._persist_jira(f"Attached Jira {issue['key']}" + (f" - set {added}." if added else "."))
+        if updates:
+            self._refresh_tree()
+            self._refresh_table()
+            self._refresh_groups()
+            self._sync_selection()
+        return True
+
+    def _jira_attach_file(self):
+        path = filedialog.askopenfilename(
+            title="Attach Jira XML", filetypes=[("Jira XML export", "*.xml"), ("All files", "*.*")])
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    self._jira_attach(f.read())
+            except OSError as exc:
+                self._status(f"Couldn't read {path}: {exc}")
+
+    def _jira_remove(self):
+        if self._jira and messagebox.askyesno(
+                "Remove Jira ticket", f"Remove the attached Jira copy of {self._jira.get('key')}?"
+                "\n\nYour task itself isn't changed."):
+            self._jira = None
+            self._render_jira()
+            self._persist_jira("Removed the attached Jira ticket.")
+
+    def _filter_by(self, kind, value):
+        """Show everything in this sprint/epic: Visual Planner, filtered."""
+        if not value:
+            return
+        project = self.active_project
+        self._show_view("Visual Planner")
+        if self.p_columns.get() == "Project":
+            self.p_columns.set("Status")
+        if project in self.store.projects:
+            self.p_project.set(project)
+        self.p_epic.set(value if kind == "epic" else ANY)
+        self.p_sprint.set(value if kind == "sprint" else ANY)
+        self._refresh_planner()
+        self._status(f"Showing {kind} '{value}'" + (f" in '{project}'." if project else "."))
+
+    def _persist_jira(self, msg):
+        """Like links: saves straight away on an existing task."""
+        if self.active_project is not None and self.editing_index is not None:
+            task = self.store.projects[self.active_project][self.editing_index]
+            if self._jira:
+                task["jira"] = self._jira
+            else:
+                task.pop("jira", None)
+            self.store.save()
+            self._status(msg)
+        else:
+            self._status(msg + " Save the task to keep it.")
 
     # -- custom fields tab --------------------------------------------------
     def _build_fields_tab(self, tab):
@@ -1946,7 +2143,8 @@ class App(tk.Tk):
             w.configure(state="readonly" if enabled else "disabled")
         self.jira_chk.state(["!disabled"] if enabled else ["disabled"])
         for w in (self.f_link_title, self.f_link_desc, self.f_link_url, self.f_link_btn,
-                  self.f_field_pick, self.f_field_add_btn, self.fields_save_btn):
+                  self.f_field_pick, self.f_field_add_btn, self.fields_save_btn,
+                  self.j_attach_btn, self.j_file_btn):
             w.state(["!disabled"] if enabled else ["disabled"])
         if enabled:
             self._toggle_jira()
@@ -1996,6 +2194,9 @@ class App(tk.Tk):
         shared_by = task.get("shared_by", "")
         self.f_from_lbl.configure(text=f"From: {shared_by}" if shared_by else "")
         self._render_fields(dict(task.get("fields") or {}))
+        self._jira = task.get("jira") or None
+        self.j_paste.delete("1.0", "end")
+        self._render_jira()
         self._links = [dict(link) for link in task.get("links", [])]
         self._reset_link_entries()
         self._render_links()
@@ -2481,6 +2682,10 @@ class App(tk.Tk):
         self._status(f"Entering new task under '{where}'. Fill in + Save.")
 
     def _save_task(self):
+        if (self.j_paste.get("1.0", "end").strip() and self.active_project
+                and not self.save_btn.instate(["disabled"])):
+            if not self._jira_attach():
+                return  # bad XML: leave it in the box so it can be fixed
         if not self.active_project or self.save_btn.instate(["disabled"]):
             self._status("Select a project first.")
             return
@@ -2513,6 +2718,8 @@ class App(tk.Tk):
             "links": [dict(link) for link in self._links],
             "fields": self._collect_fields(),
         }
+        if self._jira:
+            task["jira"] = self._jira
 
         if self.editing_index is None:
             self.store.add_task(project, task)
@@ -2645,6 +2852,9 @@ class App(tk.Tk):
         self._import_data(data)
 
     def _import_jira(self, path=None):
+        """Create tasks from a Jira XML file. Tickets you already have as
+        tasks only get their attached Jira copy refreshed - your task's own
+        fields are never overwritten."""
         path = path or filedialog.askopenfilename(
             title="Import Jira XML export",
             filetypes=[("Jira XML export", "*.xml"), ("All files", "*.*")],
@@ -2653,32 +2863,50 @@ class App(tk.Tk):
             return
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
-                issues = parse_jira_xml(f.read())
+                issues = parse_jira_issues(f.read())
         except (OSError, ValueError, ET.ParseError) as exc:
             messagebox.showerror("Import Jira XML", f"Couldn't read that Jira export:\n{exc}")
             return
-        # Into the selected project; otherwise one named after the Jira project.
-        by_project = {}
-        for jira_project, task in issues:
-            by_project.setdefault(self.active_project or jira_project, []).append(task)
-        # Ask once (not per project) about tickets imported before.
-        dupes = sum(1 for project, tasks in by_project.items() for t in tasks
-                    if t["id"] in {x.get("id") for x in self.store.projects.get(project, [])})
-        replace = bool(dupes) and messagebox.askyesno(
-            "Import Jira XML",
-            f"{dupes} of these Jira issue(s) were imported before.\n\n"
-            f"Replace them with this version?\n(No keeps your copies and skips them.)",
-        )
+
+        by_key = {}
+        for project, tasks in self.store.projects.items():
+            for i, t in enumerate(tasks):
+                key = (t.get("jira") or {}).get("key") or t.get("jira_ref")
+                if key:
+                    by_key.setdefault(key, (project, i))
+        refreshed, by_project = [], {}
+        for issue in issues:
+            if issue["key"] in by_key:
+                project, i = by_key[issue["key"]]
+                task = self.store.projects[project][i]
+                for kind, value in jira_list_updates(task, issue, task.get("jira")).items():
+                    task[kind] = value
+                    if value not in self.store.names(project, kind):
+                        self.store.groups[kind].setdefault(project, []).append(value)
+                task["jira"] = issue
+                refreshed.append(issue["key"])
+            else:
+                by_project.setdefault(self.active_project or issue["project"], []).append(
+                    jira_task(issue))
+        if refreshed:
+            self.store.save()
         for project, tasks in by_project.items():
             lists = {kind: sorted({t[kind] for t in tasks if t.get(kind)}) for kind in GROUP_KINDS}
             self._import_data({"project": project, "from": "Jira", "lists": lists,
-                               "tasks": tasks, "field_defs": JIRA_LONG_FIELDS},
-                              replace=replace)
-        n = len(issues)
-        keys = ", ".join(t["jira_ref"] for _, t in issues[:5] if t["jira_ref"])
-        more = f" (+{n - 5} more)" if n > 5 else ""
-        self._status(f"Imported {n} Jira issue{'s' if n != 1 else ''}: {keys}{more} "
-                     f"into {', '.join(repr(p) for p in by_project)}.")
+                               "tasks": tasks}, replace=False)
+        if refreshed and not by_project:
+            self._refresh_views()
+            if self.editing_index is not None:  # it may be the one on screen
+                self._load_task_into_form(self.store.projects[self.active_project][self.editing_index])
+        created = sum(len(t) for t in by_project.values())
+        parts = []
+        if created:
+            parts.append(f"created {created} task{'s' if created != 1 else ''} in "
+                         + ", ".join(repr(p) for p in by_project))
+        if refreshed:
+            parts.append("refreshed the Jira copy on " + ", ".join(refreshed[:5])
+                         + (f" (+{len(refreshed) - 5} more)" if len(refreshed) > 5 else ""))
+        self._status("Jira import: " + "; ".join(parts) + ".")
 
     def _import_data(self, data, replace=None):
         """Merge shared/imported tasks into a project. replace=None asks the
@@ -2722,7 +2950,7 @@ class App(tk.Tk):
                 self.store.ensure_field(name, types.get(name) or ("long" if long_value else "text"),
                                         source=sender)
 
-        known = {key for key, _ in TASK_FIELDS} | {"id", "fields"}
+        known = {key for key, _ in TASK_FIELDS} | {"id", "fields", "jira"}
         added = replaced = 0
         for raw in incoming:
             task = new_task(str(raw["title"]))
