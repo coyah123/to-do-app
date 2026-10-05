@@ -266,9 +266,9 @@ What happens on import:
 
 ## Jira tickets
 
-A Jira ticket is **attached to a task for reference — it never overwrites
-your task.** The only things from a ticket that enter your own data are its
-**epic** and **sprint**, so you can filter by them.
+A Jira ticket is **attached to a task** and kept as a read-only copy. It
+also fills in your task's **epic, sprint, description, dates and links** —
+but **never over something you wrote yourself** (see the rules below).
 
 ### Attach a ticket to a task
 
@@ -292,17 +292,34 @@ Paste a newer export at any time to **refresh** it; **Remove** detaches it.
 The tab reads **Jira ✓** when a ticket is attached. If the pasted text
 isn't valid Jira XML, it stays in the box and the status bar says why.
 
-### What it does to your data — only epic and sprint
+### What it fills in on your task
 
-- The ticket's epic and sprint are **added to the project's lists**.
-- If your task has **no** epic/sprint yet, it takes the ticket's. If you've
-  set your **own**, yours is kept. (If the value originally came from the
-  ticket and the ticket later moves to a new sprint, refreshing follows it.)
-- Your title, description, status, dates, notes, links and custom fields
-  are **never touched**.
-- In the Jira tab, the **Sprint** and **Epic** values are links: click one
-  to open the **Visual Planner filtered** to that sprint/epic in the
-  project.
+| Your field | From the ticket |
+|---|---|
+| **Epic / Sprint** | The ticket's epic and sprint (also added to the project's lists, so you can filter by them) |
+| **Description** | The Jira description (HTML converted to readable text) |
+| **Due** | Jira's due date |
+| **Completed** | Jira's resolved date — only if your task's status is **Done** |
+| **Created** | Jira's created date — only for tasks *created* from a Jira import |
+| **Links** | Every link in the XML: the ticket itself, the epic, parent, linked issues (e.g. "is blocked by MDA-9"), subtasks, attachments, and any links inside the description or comments |
+
+**Your edits always win:**
+
+- Epic, sprint, description and due date are filled in only when **your
+  field is empty**, or when it **still holds what the ticket put there
+  last time** (so a refreshed ticket — e.g. a new due date — updates it).
+  As soon as you type your own value, refreshing the ticket leaves it alone.
+  No duplicate descriptions: the ticket's text is never appended to yours.
+- Links are **added**, never replaced. Links already on the task are
+  skipped, and a link you **removed** after an earlier attach isn't added
+  back when you refresh.
+- Status, title, blockers, notes and custom fields are **never touched**.
+
+The status bar says what was filled in, e.g. *"Attached Jira MDA-12 —
+filled in description, due date, 8 links."*
+
+In the Jira tab, the **Sprint** and **Epic** values are links: click one to
+open the **Visual Planner filtered** to that sprint/epic in the project.
 
 ### Create tasks from a Jira export
 
@@ -311,10 +328,11 @@ too) creates one task per issue — a single ticket or a whole search export:
 
 - Tasks go into the **selected project**, or a project named after the
   Jira project if none is selected.
-- New tasks get only the **title, epic and sprint**; the full ticket is
-  attached in the Jira tab.
-- Tickets you **already have** as tasks aren't duplicated or overwritten —
-  only their attached copy (and Jira-sourced epic/sprint) is refreshed.
+- New tasks get the **title**, plus everything in the table above
+  (epic, sprint, description, due date, created date, links); the full
+  ticket is attached in the Jira tab.
+- Tickets you **already have** as tasks aren't duplicated. Their attached
+  copy is refreshed and the same "your edits win" rules apply.
 
 > **Epic names:** Jira's XML only includes the epic's *key* (e.g. `MDA-3`),
 > not its name, so that's what the epic is called. Rename it in **Subgroups,

@@ -242,19 +242,31 @@ class _HTMLText(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts = []
+        self.links = []   # [(href, link text)]
+        self._href = None
+        self._href_text = []
 
     def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            href = dict(attrs).get("href") or ""
+            if href and not href.startswith("#"):
+                self._href, self._href_text = href, []
         if tag == "li":
             self.parts.append("\n- ")
         elif tag in self.BLOCKS:
             self.parts.append("\n")
 
     def handle_endtag(self, tag):
+        if tag == "a" and self._href:
+            self.links.append((self._href, "".join(self._href_text).strip()))
+            self._href = None
         if tag in self.BLOCKS and tag != "li":
             self.parts.append("\n")
 
     def handle_data(self, data):
         self.parts.append(data)
+        if self._href:
+            self._href_text.append(data)
 
 
 def html_to_text(markup):
@@ -265,6 +277,15 @@ def html_to_text(markup):
     text = html.unescape("".join(parser.parts)).replace("\xa0", " ")
     text = re.sub(r"[ \t]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def html_links(markup):
+    """[(href, text)] for every <a href> in some HTML."""
+    if not markup:
+        return []
+    parser = _HTMLText()
+    parser.feed(markup)
+    return parser.links
 
 
 def jira_date(value, with_time=False):
@@ -358,6 +379,41 @@ def parse_jira_issues(text):
             if name not in ("Sprint", "Epic Link", "Parent Link", "Rank"):
                 fields[name] = ", ".join(values)
 
+        # Every link in the XML: the ticket, linked issues, parent, epic,
+        # subtasks, attachments and any <a href> in the description/comments.
+        url = get("link")
+        base = url.split("/browse/")[0] if "/browse/" in url else ""
+        found = []
+
+        def add_link(title, href, description=""):
+            if href and href not in {l["url"] for l in found}:
+                found.append({"title": title or href, "description": description, "url": href})
+
+        add_link(key or "Jira ticket", url, "Jira ticket" + (f": {get('summary')}" if get("summary") else ""))
+        if base:
+            browse = base + "/browse/"
+            if epic and re.match(r"^[A-Z][A-Z0-9_]*-\d+$", epic):
+                add_link(f"Epic {epic}", browse + epic, "Jira epic")
+            if get("parent"):
+                add_link(f"Parent {get('parent')}", browse + get("parent"), "Jira parent issue")
+            for lt in item.findall("issuelinks/issuelinktype"):
+                for direction in lt:
+                    desc = direction.get("description", "")
+                    for k in direction.findall("issuelink/issuekey"):
+                        other = (k.text or "").strip()
+                        add_link(f"{desc} {other}".strip(), browse + other, "Linked Jira issue")
+            for sub in all_text("subtasks/subtask"):
+                add_link(f"Subtask {sub}", browse + sub, "Jira subtask")
+            for att in item.findall("attachments/attachment"):
+                name, att_id = att.get("name", ""), att.get("id", "")
+                if att_id and name:
+                    add_link(name, f"{base}/secure/attachment/{att_id}/{name}", "Jira attachment")
+        for markup in [get("description")] + [c.text or "" for c in item.findall("comments/comment")]:
+            for href, text in html_links(markup):
+                if href.startswith("/") and base:
+                    href = base + href
+                add_link(text or href, href, "Link from the Jira ticket")
+
         project_el = item.find("project")
         project = (project_el.text or "").strip() if project_el is not None else ""
         issues.append({
@@ -385,35 +441,57 @@ def parse_jira_issues(text):
                           "created": jira_date(c.get("created", ""), True),
                           "body": html_to_text(c.text or "")}
                          for c in item.findall("comments/comment")],
+            "links": found,
             "attached": now_stamp(),
         })
     return issues
 
 
-def jira_task(issue):
-    """A new task from a Jira issue. Only the title, epic and sprint come
-    into your data; the full ticket rides along in task["jira"] (read-only,
-    shown in the form's Jira tab)."""
-    task = new_task(issue["summary"] or issue["key"] or "(untitled)")
-    task.update(
-        id=f"jira:{issue['key']}" if issue["key"] else task["id"],
-        epic=issue["epic"],
-        sprint=issue["sprint"],
-        jira=issue,
-    )
-    return task
+# Task field <- ticket value that a Jira ticket fills in on your side.
+JIRA_SYNCED = (("epic", "epic"), ("sprint", "sprint"),
+               ("description", "description"), ("due_date", "due"))
 
 
-def jira_list_updates(task, issue, old_issue):
-    """Epic/sprint values to take from a (re)attached ticket. A task's own
-    value wins unless it's empty or still the value the old ticket gave it."""
+def jira_updates(task, issue, old_issue):
+    """What a (re)attached ticket fills in on the task.
+
+    Epic, sprint, description and due date: taken from the ticket only if
+    your field is empty, or still holds what the previous copy of the ticket
+    put there - anything you wrote yourself is kept. Completed date: Jira's
+    resolved date, only when your task is Done. Links: every link in the
+    ticket that isn't on the task yet (ones you removed after an earlier
+    attach aren't re-added)."""
+    old = old_issue or {}
     updates = {}
-    for kind in ("epic", "sprint"):
-        value = issue.get(kind, "")
-        current = task.get(kind, "")
-        if value and (not current or current == (old_issue or {}).get(kind)):
-            updates[kind] = value
+    for field, key in JIRA_SYNCED:
+        value = (issue.get(key) or "").strip()
+        current = (task.get(field) or "").strip()
+        if value and value != current and (not current or current == (old.get(key) or "").strip()):
+            updates[field] = value
+    resolved = issue.get("resolved", "")
+    done_date = task.get("completed_date", "")
+    if (resolved and task.get("status") == DONE and resolved != done_date
+            and (not done_date or done_date == old.get("resolved"))):
+        updates["completed_date"] = resolved
+    have = {link.get("url") for link in task.get("links") or []}
+    offered_before = {link.get("url") for link in old.get("links") or []}
+    new_links = [dict(link) for link in issue.get("links", [])
+                 if link["url"] not in have and link["url"] not in offered_before]
+    if new_links:
+        updates["links"] = [dict(link) for link in task.get("links") or []] + new_links
     return updates
+
+
+def jira_task(issue):
+    """A new task from a Jira issue: title, epic, sprint, description, due
+    date, links and Jira's created date; the full ticket rides along in
+    task["jira"] (read-only, shown in the form's Jira tab)."""
+    task = new_task(issue["summary"] or issue["key"] or "(untitled)")
+    task.update(id=f"jira:{issue['key']}" if issue["key"] else task["id"], jira=issue)
+    if issue.get("created"):
+        task["added_date"] = issue["created"]
+    task.update(jira_updates(task, issue, None))
+    return task
 
 
 def set_status(task, status):
@@ -1870,22 +1948,47 @@ class App(tk.Tk):
         old, self._jira = self._jira, issue
         self.j_paste.delete("1.0", "end")
 
-        # The ticket's epic/sprint are the only things that enter your data.
+        # Fill in epic, sprint, description, due/completed dates and links -
+        # only where you haven't written your own (see jira_updates).
         project = self.active_project
-        current = {kind: self.f_kinds[kind].get().strip() for kind in ("epic", "sprint")}
-        updates = jira_list_updates(current, issue, old)
+        current = {
+            "epic": self.f_epic.get().strip(), "sprint": self.f_sprint.get().strip(),
+            "description": self.f_desc.get("1.0", "end").strip(),
+            "due_date": self.f_due.get().strip(), "status": self.f_status.get(),
+            "completed_date": self._completed_date, "links": self._links,
+        }
+        updates = jira_updates(current, issue, old)
         for kind in ("epic", "sprint"):
             if issue.get(kind) and issue[kind] not in self.store.names(project, kind):
                 self.store.add_name(project, kind, issue[kind])
         self._refresh_choices()
-        for kind, value in updates.items():
-            self.f_kinds[kind].set(value)
+        for kind in ("epic", "sprint"):
+            if kind in updates:
+                self.f_kinds[kind].set(updates[kind])
+        if "description" in updates:
+            self._set_text(self.f_desc, updates["description"])
+        if "due_date" in updates:
+            self._set_entry(self.f_due, updates["due_date"])
+        if "completed_date" in updates:
+            self._completed_date = updates["completed_date"]
+            self.f_completed_lbl.configure(text=f"Completed: {self._completed_date}")
+        if "links" in updates:
+            self._links = updates["links"]
+            self._render_links()
         if updates and self.editing_index is not None:
-            self.store.projects[project][self.editing_index].update(updates)
+            self.store.projects[project][self.editing_index].update(
+                {k: ([dict(x) for x in v] if k == "links" else v) for k, v in updates.items()})
 
         self._render_jira()
-        added = ", ".join(f"{k} '{v}'" for k, v in updates.items())
-        self._persist_jira(f"Attached Jira {issue['key']}" + (f" - set {added}." if added else "."))
+        labels = {"epic": "epic", "sprint": "sprint", "description": "description",
+                  "due_date": "due date", "completed_date": "completed date"}
+        filled = [labels[k] for k in updates if k in labels]
+        if "links" in updates:
+            n = len(updates["links"]) - len(current["links"])
+            filled.append(f"{n} link{'s' if n != 1 else ''}")
+        self._persist_jira(f"Attached Jira {issue['key']}"
+                           + (f" - filled in {', '.join(filled)}." if filled else
+                              " - nothing new to fill in (your values kept)."))
         if updates:
             self._refresh_tree()
             self._refresh_table()
@@ -2962,10 +3065,11 @@ class App(tk.Tk):
             if issue["key"] in by_key:
                 project, i = by_key[issue["key"]]
                 task = self.store.projects[project][i]
-                for kind, value in jira_list_updates(task, issue, task.get("jira")).items():
-                    task[kind] = value
-                    if value not in self.store.names(project, kind):
-                        self.store.groups[kind].setdefault(project, []).append(value)
+                task.update(jira_updates(task, issue, task.get("jira")))
+                for kind in ("epic", "sprint"):
+                    names = self.store.groups[kind].setdefault(project, [])
+                    if issue.get(kind) and issue[kind] not in names:
+                        names.append(issue[kind])
                 task["jira"] = issue
                 refreshed.append(issue["key"])
             else:
