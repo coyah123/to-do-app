@@ -1021,6 +1021,10 @@ class App(tk.Tk):
         self.store = store
         self.title("To-Do Tracker")
         self.settings = load_settings()
+        # One "Hide done" switch shared by every view (and View menu).
+        self.hide_done_all = tk.BooleanVar(
+            master=self, value=self.settings.get("hide_done",
+                                                 self.settings.get("buddy_hide_done", False)))
         self.view = None
 
         # The project the form is currently working under.
@@ -1084,6 +1088,8 @@ class App(tk.Tk):
             )
 
         view_menu.add_separator()
+        view_menu.add_checkbutton(label="Hide done tasks (all views)",
+                                  variable=self.hide_done_all, command=self._on_hide_done)
         self.pin_var = tk.BooleanVar(value=self.settings.get("buddy_on_top", True))
         view_menu.add_checkbutton(
             label="Buddy always on top", variable=self.pin_var,
@@ -1204,9 +1210,9 @@ class App(tk.Tk):
         self.p_epic, self.p_epic_cb = combo("Epic", "epic", [], ANY, 12)
         self.p_sprint, self.p_sprint_cb = combo("Sprint", "sprint", [], ANY, 12)
         self.p_order, _ = combo("Order", "order", PLANNER_ORDER, "Manual", 9)
-        self.p_hide_done = tk.BooleanVar(value=self.settings.get("planner_hide_done", False))
-        ttk.Checkbutton(bar, text="Hide Done", variable=self.p_hide_done,
-                        command=self._refresh_planner).pack(side="left")
+        self.p_hide_done = self.hide_done_all
+        ttk.Checkbutton(bar, text="Hide done", variable=self.p_hide_done,
+                        command=self._on_hide_done).pack(side="left")
         ttk.Button(bar, text="Delete card", command=self._delete_task).pack(side="right")
 
         self.planner_form_slot = ttk.Frame(f, padding=(0, 0, 6, 6))
@@ -1303,7 +1309,7 @@ class App(tk.Tk):
     def _refresh_planner(self):
         for key, var in (("columns", self.p_columns), ("project", self.p_project),
                          ("epic", self.p_epic), ("sprint", self.p_sprint),
-                         ("order", self.p_order), ("hide_done", self.p_hide_done)):
+                         ("order", self.p_order)):
             self.settings["planner_" + key] = var.get()
         save_settings(self.settings)
 
@@ -1647,10 +1653,10 @@ class App(tk.Tk):
         self.b_sort.set(saved_sort if saved_sort in BUDDY_SORTS else "Activity")
         self.b_sort.pack(side="left", padx=(4, 0))
         self.b_sort.bind("<<ComboboxSelected>>", lambda e: self._refresh_buddy())
-        self.b_hide_done = tk.BooleanVar(value=self.settings.get("buddy_hide_done", True))
+        self.b_hide_done = self.hide_done_all
         tk.Checkbutton(
             row2, text="Hide done", variable=self.b_hide_done, bg=BUDDY_BG,
-            activebackground=BUDDY_BG, command=self._refresh_buddy,
+            activebackground=BUDDY_BG, command=self._on_hide_done,
         ).pack(side="right")
 
         self.b_summary = tk.Label(
@@ -1740,7 +1746,6 @@ class App(tk.Tk):
         projects = sorted(self.store.projects, key=str.lower)
         sprint = self._buddy_sprints(projects)
         self.settings["buddy_sprint"] = sprint
-        self.settings["buddy_hide_done"] = self.b_hide_done.get()
         self.settings["buddy_sort"] = self.b_sort.get()
         # Collapsed folders: "project" or "project/group".
         collapsed = set(self.settings.get("buddy_collapsed", []))
@@ -1968,9 +1973,11 @@ class App(tk.Tk):
         self._build_form(form)
 
     def _build_sidebar(self, left):
-        ttk.Label(left, text="Projects & Tasks", font=("", 11, "bold")).pack(
-            anchor="w"
-        )
+        title_row = ttk.Frame(left)
+        title_row.pack(fill="x")
+        ttk.Label(title_row, text="Projects & Tasks", font=("", 11, "bold")).pack(side="left")
+        ttk.Checkbutton(title_row, text="Hide done", variable=self.hide_done_all,
+                        command=self._on_hide_done).pack(side="right")
 
         # One add box: a new project when nothing is selected, otherwise a
         # new subgroup inside the selected project.
@@ -2082,10 +2089,10 @@ class App(tk.Tk):
         sort_cb.pack(side="left", padx=(4, 12))
         sort_cb.bind("<<ComboboxSelected>>",
                      lambda e: self._sort_by(SORT_OPTIONS[self.sort_var.get()], keep_dir=True))
-        self.hide_done = tk.BooleanVar(value=False)
+        self.hide_done = self.hide_done_all
         ttk.Checkbutton(
-            ctrl, text="Hide Done", variable=self.hide_done,
-            command=self._refresh_table,
+            ctrl, text="Hide done", variable=self.hide_done,
+            command=self._on_hide_done,
         ).pack(side="left")
 
         wrap = ttk.Frame(center)
@@ -3297,6 +3304,17 @@ class App(tk.Tk):
         self._refresh_views()
 
     # -- views ------------------------------------------------------------
+    def _on_hide_done(self):
+        """Any "Hide done" box (or the View menu) changes every view."""
+        self.settings["hide_done"] = self.hide_done_all.get()
+        save_settings(self.settings)
+        self._refresh_views()
+        self._load_epic_tasks()
+        if self.view == "Buddy":
+            self._refresh_buddy()
+        self._status("Done tasks hidden in all views." if self.hide_done_all.get()
+                     else "Done tasks shown in all views.")
+
     def _refresh_views(self):
         self._refresh_tree()
         self._refresh_table()
@@ -3333,6 +3351,8 @@ class App(tk.Tk):
                 group_nodes[name] = gid
             for i, task in enumerate(tasks):
                 status = task.get("status", DEFAULT_STATUS)
+                if status == DONE and self.hide_done_all.get():
+                    continue
                 mark = "✓ " if status == DONE else "● "
                 tid = self.tree.insert(
                     group_nodes.get(task.get("group"), pid), "end",
@@ -3583,9 +3603,9 @@ class App(tk.Tk):
         self.e_filter.set(ALL_PROJECTS)
         self.e_filter.pack(side="left", padx=(4, 10))
         self.e_filter.bind("<<ComboboxSelected>>", lambda e: self._refresh_epics())
-        self.e_hide_done = tk.BooleanVar(value=False)
+        self.e_hide_done = self.hide_done_all
         ttk.Checkbutton(top, text="Hide done", variable=self.e_hide_done,
-                        command=self._refresh_epics).pack(side="left")
+                        command=self._on_hide_done).pack(side="left")
         self.e_new_name = ttk.Entry(top, width=18)
         ttk.Button(top, text="+ Epic", command=self._epic_new).pack(side="right")
         self.e_new_name.pack(side="right", padx=4)
@@ -3773,7 +3793,10 @@ class App(tk.Tk):
         project, name = self.e_sel
         tasks = [(i, t) for i, t in enumerate(self.store.projects.get(project, []))
                  if t.get("epic") == name]
-        self.e_tasks_lbl.configure(text=f"Tasks in this epic ({len(tasks)})")
+        done_n = sum(1 for _, t in tasks if t.get("status") == DONE)
+        hidden = done_n if self.hide_done_all.get() else 0
+        self.e_tasks_lbl.configure(text=f"Tasks in this epic ({len(tasks)})"
+                                   + (f" - {hidden} done hidden" if hidden else ""))
         sprints = sorted({t.get("sprint") for _, t in tasks if t.get("sprint")}, key=str.lower)
         own = self.store.epic_meta(project, name).get("sprint", "")
         parts = [f"Epic sprint: {own}" if own else "Epic not attached to a sprint"]
@@ -3783,6 +3806,8 @@ class App(tk.Tk):
                                    priority_rank(it[1])))
         for i, t in tasks:
             status = t.get("status", DEFAULT_STATUS)
+            if hidden and status == DONE:
+                continue
             rid = self.e_tasks.insert("", "end", text=("\u2713 " if status == DONE else "\u25cf ")
                                       + (t.get("title") or "(untitled)") + jira_mark(t),
                                       tags=(STATUSES[status][1],))

@@ -67,6 +67,11 @@ Windows, 🔄 on macOS, ⟳ on Linux) after their title in every view.
 Switch views from the **View** menu or with **Ctrl+1 / Ctrl+2 / Ctrl+3**.
 Each view remembers its own window size and position.
 
+**Hide done:** every view has a **Hide done** checkbox (Manager's tree and
+task table, the Epics tab, Buddy, the Visual Planner) and the View menu has
+**Hide done tasks (all views)**. It's **one switch**: ticking any of them
+hides Done tasks everywhere at once, and the app remembers it.
+
 **Default view:** **View → Default view** picks the view the app opens in
 (Buddy unless you change it). The list there includes every view, so new
 views show up automatically.
@@ -482,7 +487,7 @@ Paste the result straight into a Confluence page.
 | Menu | Items |
 |---|---|
 | **File** | Share selected… · Import shared tasks… · Import Jira XML… · Import from Jira search… · Refresh all Jira tickets · Gather Jira imports into 'Imported' |
-| **View** | Buddy · Manager · Visual Planner · **Default view** (one option per view) · Buddy always on top |
+| **View** | Buddy · Manager · Visual Planner · **Default view** (one option per view) · Hide done tasks (all views) · Buddy always on top |
 | **Settings** | Your name… · Jira connection… |
 
 On **macOS** use **Cmd** wherever this guide says Ctrl (Cmd+1, Cmd+S, …);
