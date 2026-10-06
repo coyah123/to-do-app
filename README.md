@@ -430,7 +430,23 @@ requests the same XML as **Export → XML**, so everything above applies.
 | **CA file (optional)** | If your company uses its own HTTPS certificates and you get an SSL error, point this at the company CA certificate (`.pem`/`.crt`) |
 
 Click **Test connection** ("✓ Connected as …"), then **Save**.
-**Disconnect** removes the saved connection from this computer.
+**Disconnect** removes the saved connection from this computer. In this
+panel the Token box starts empty — leave it blank to keep the current
+token, or paste a new one.
+
+**Token expired or rejected? — Settings → Update Jira credentials…**
+
+- A small panel with just a fresh **New token** box (**Show** lets you
+  check what you pasted), plus Email for Cloud, and **Remember on this
+  computer**.
+- **Save & retry** checks the token with Jira. If it's still rejected you
+  see why right in the panel; if it works, the app **automatically retries
+  what failed** (the fetch, refresh or search).
+- You don't have to find it yourself: whenever Jira rejects the token (401,
+  403 or an SSO/login page), the error asks **"Update your Jira credentials
+  now?"** — Yes opens this panel. If you didn't tick Remember, the app asks
+  for the token the first time you use Jira after restarting, then carries
+  on.
 
 **Use it**
 
@@ -488,7 +504,7 @@ Paste the result straight into a Confluence page.
 |---|---|
 | **File** | Share selected… · Import shared tasks… · Import Jira XML… · Import from Jira search… · Refresh all Jira tickets · Gather Jira imports into 'Imported' |
 | **View** | Buddy · Manager · Visual Planner · **Default view** (one option per view) · Hide done tasks (all views) · Buddy always on top |
-| **Settings** | Your name… · Jira connection… |
+| **Settings** | Your name… · Jira connection… · Update Jira credentials… |
 
 On **macOS** use **Cmd** wherever this guide says Ctrl (Cmd+1, Cmd+S, …);
 right-click is a two-finger click or **Ctrl+click**.
@@ -543,6 +559,9 @@ folder is **gitignored** — nothing in it is ever pushed to GitHub.
   Python window when typing your name.** Fixed — every text prompt (e.g.
   **Settings → Your name…**) now opens as a panel *inside* the app window.
   Update to the latest version.
+- **Jira says the token was rejected / expired.** Use **Settings → Update
+  Jira credentials…** (or answer Yes when the error asks), paste a new
+  token and click **Save & retry**.
 - **"That isn't Jira XML I can read."** Make sure you used Jira's
   **Export → XML** (not Word/printable) and copied the whole document.
 - **Buddy is off-screen** (e.g. after unplugging a monitor). Close the app,

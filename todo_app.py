@@ -688,7 +688,9 @@ def jira_base_url(text):
 
 
 class JiraError(Exception):
-    pass
+    def __init__(self, message, auth=False):
+        super().__init__(message)
+        self.auth = auth  # True = the token/credentials were the problem
 
 
 class JiraClient:
@@ -703,7 +705,8 @@ class JiraClient:
         if not self.base:
             raise JiraError("No Jira address set (Settings > Jira connection).")
         if not self.token:
-            raise JiraError("No Jira token - enter it in Settings > Jira connection.")
+            raise JiraError("No Jira token - enter it in Settings > Update Jira credentials.",
+                            auth=True)
         req = urllib.request.Request(self.base + path, headers={
             "Accept": accept, "User-Agent": "todo-tracker",
             "Authorization": (f"Bearer {self.token}" if self.auth == "pat" else
@@ -721,7 +724,8 @@ class JiraClient:
                      "XML export may be disabled on this Jira.",
                 404: "Not found (404). Check the ticket key and the Jira address.",
             }
-            raise JiraError(hints.get(exc.code, f"Jira returned HTTP {exc.code}.")) from None
+            raise JiraError(hints.get(exc.code, f"Jira returned HTTP {exc.code}."),
+                            auth=exc.code in (401, 403)) from None
         except ssl.SSLError as exc:
             raise JiraError("SSL certificate problem talking to Jira. If your company "
                             "uses its own certificates, set the CA file in Settings > "
@@ -738,7 +742,7 @@ class JiraClient:
         head = body.lstrip()[:200].lower()
         if accept.endswith("xml") and (head.startswith("<!doctype html") or "<html" in head):
             raise JiraError("Jira sent back a web page instead of data - usually a "
-                            "login/SSO page, meaning the token wasn't accepted.")
+                            "login/SSO page, meaning the token wasn't accepted.", auth=True)
         return body
 
     def myself(self):
@@ -1109,6 +1113,8 @@ class App(tk.Tk):
         settings_menu = tk.Menu(menubar, tearoff=False)
         settings_menu.add_command(label="Your name\u2026", command=lambda: self._ask_name())
         settings_menu.add_command(label="Jira connection\u2026", command=self._jira_settings)
+        settings_menu.add_command(label="Update Jira credentials\u2026",
+                                  command=lambda: self._jira_credentials())
         menubar.add_cascade(label="Settings", menu=settings_menu)
         self.config(menu=menubar)
 
@@ -2579,8 +2585,10 @@ class App(tk.Tk):
         return JiraClient(cfg["base_url"], cfg.get("auth", "pat"), token,
                           cfg.get("email", ""), cfg.get("ca_file", ""))
 
-    def _run_bg(self, work, done, busy_msg):
-        """Run a network call off the UI thread; deliver the result on it."""
+    def _run_bg(self, work, done, busy_msg, retry=None, on_error=None):
+        """Run a network call off the UI thread; deliver the result on it.
+        If Jira rejects the credentials, offer to update them and then run
+        `retry` (the action that failed)."""
         self._status(busy_msg)
         self.configure(cursor="watch")
         box = {}
@@ -2590,6 +2598,7 @@ class App(tk.Tk):
                 box["result"] = work()
             except JiraError as exc:
                 box["error"] = str(exc)
+                box["auth"] = exc.auth
             except Exception as exc:  # noqa: BLE001 - report anything to the user
                 box["error"] = f"Unexpected error: {exc}"
 
@@ -2603,17 +2612,32 @@ class App(tk.Tk):
             self.configure(cursor="")
             if "error" in box:
                 self._status(box["error"])
-                messagebox.showerror("Jira", box["error"])
+                if on_error:
+                    on_error(box["error"], box.get("auth", False))
+                elif box.get("auth"):
+                    if messagebox.askyesno(
+                            "Jira", box["error"] + "\n\nUpdate your Jira credentials now?"
+                            + ("\n(It will retry straight after.)" if retry else "")):
+                        self._jira_credentials(retry=retry)
+                else:
+                    messagebox.showerror("Jira", box["error"])
             else:
                 done(box["result"])
 
         self.after(100, poll)
 
-    def _need_jira(self):
+    def _need_jira(self, retry=None):
+        """A ready client, or None after asking for whatever is missing."""
         client = self._jira_client()
         if client is None:
-            self._status("Set up the Jira connection first (Settings > Jira connection).")
-            self._jira_settings()
+            if load_jira_config().get("base_url"):
+                # Address known, token missing (e.g. not remembered): just ask
+                # for the token, then carry on with what you were doing.
+                self._status("Enter your Jira token to continue.")
+                self._jira_credentials(retry=retry)
+            else:
+                self._status("Set up the Jira connection first (Settings > Jira connection).")
+                self._jira_settings()
         return client
 
     def _jira_fetch(self):
@@ -2626,7 +2650,7 @@ class App(tk.Tk):
             self._status("Type a ticket key like MDA-12 (or paste its URL).")
             self.j_fetch_key.focus_set()
             return
-        client = self._need_jira()
+        client = self._need_jira(retry=self._jira_fetch)
         if not client:
             return
         key = m.group(1)
@@ -2638,7 +2662,8 @@ class App(tk.Tk):
                 return
             self._jira_attach(xml_text)
 
-        self._run_bg(lambda: client.issue_xml(key), done, f"Fetching {key} from Jira\u2026")
+        self._run_bg(lambda: client.issue_xml(key), done, f"Fetching {key} from Jira\u2026",
+                     retry=self._jira_fetch)
 
     def _jira_refresh_all(self):
         keys = sorted({(t.get("jira") or {}).get("key") for ts in self.store.projects.values()
@@ -2646,7 +2671,7 @@ class App(tk.Tk):
         if not keys:
             self._status("No tasks have a Jira ticket attached yet.")
             return
-        client = self._need_jira()
+        client = self._need_jira(retry=self._jira_refresh_all)
         if not client:
             return
 
@@ -2660,7 +2685,8 @@ class App(tk.Tk):
             for xml_text in parts:
                 self._import_jira_text(xml_text, create=False)
 
-        self._run_bg(work, done, f"Refreshing {len(keys)} Jira ticket(s)\u2026")
+        self._run_bg(work, done, f"Refreshing {len(keys)} Jira ticket(s)\u2026",
+                     retry=self._jira_refresh_all)
 
     def _gather_imports(self):
         """Move tasks created by Jira imports back into the Imported project."""
@@ -2695,7 +2721,7 @@ class App(tk.Tk):
         self._refresh_views()
 
     def _jira_search_import(self):
-        client = self._need_jira()
+        client = self._need_jira(retry=self._jira_search_import)
         if not client:
             return
         where = f"the '{IMPORTED_PROJECT}' project"
@@ -2705,9 +2731,13 @@ class App(tk.Tk):
                 return
             self.settings["jira_last_jql"] = jql
             save_settings(self.settings)
-            self._run_bg(lambda: client.search_xml(jql),
+            current = self._jira_client()  # fresh: credentials may have changed
+            if current is None:
+                self._jira_credentials(retry=lambda: run(jql))
+                return
+            self._run_bg(lambda: current.search_xml(jql),
                          lambda xml_text: self._import_jira_text(xml_text),
-                         "Searching Jira\u2026")
+                         "Searching Jira\u2026", retry=lambda: run(jql))
 
         self._prompt("Import from Jira search",
                      f"JQL query. Matching tickets become tasks in {where}; ones you "
@@ -2715,6 +2745,87 @@ class App(tk.Tk):
                      self.settings.get("jira_last_jql",
                                        "assignee = currentUser() AND resolution = Unresolved"),
                      run)
+
+    def _jira_credentials(self, retry=None):
+        """Small panel to replace the Jira token (e.g. after it expired),
+        test it, and retry whatever failed."""
+        cfg = load_jira_config()
+        if not cfg.get("base_url"):
+            self._jira_settings()  # nothing set up yet: full connection panel
+            return
+        self._close_prompt()
+        bg = "#ffffff"
+        panel = self._prompt_panel = tk.Frame(self, bg=bg, highlightthickness=2,
+                                              highlightbackground=ACCENT, padx=14, pady=12)
+        cloud = cfg.get("auth") == "cloud"
+        tk.Label(panel, text="Update Jira credentials", bg=bg,
+                 font=("", 11, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        tk.Label(panel, bg=bg, fg="#555", wraplength=320, justify="left",
+                 text=f"{cfg['base_url']}  \u00b7  "
+                      + ("Cloud: email + API token" if cloud else "Personal access token")
+                 ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
+        email = ttk.Entry(panel, width=34)
+        if cloud:
+            tk.Label(panel, text="Email", bg=bg).grid(row=2, column=0, sticky="w", pady=2)
+            email.insert(0, cfg.get("email", ""))
+            email.grid(row=2, column=1, columnspan=2, sticky="ew", pady=2)
+        tk.Label(panel, text="New token", bg=bg).grid(row=3, column=0, sticky="w", pady=2)
+        token = ttk.Entry(panel, width=34, show="\u2022")
+        token.grid(row=3, column=1, sticky="ew", pady=2)
+        show = tk.BooleanVar(value=False)
+        tk.Checkbutton(panel, text="Show", variable=show, bg=bg, activebackground=bg,
+                       command=lambda: token.configure(show="" if show.get() else "\u2022")
+                       ).grid(row=3, column=2, padx=(4, 0))
+        remember = tk.BooleanVar(value=bool(cfg.get("token")))
+        tk.Checkbutton(panel, text="Remember on this computer", variable=remember,
+                       bg=bg, activebackground=bg).grid(row=4, column=1, columnspan=2, sticky="w")
+        result = tk.Label(panel, text="", bg=bg, fg="#555", wraplength=320, justify="left")
+        result.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        def save(event=None):
+            new = token.get().strip()
+            if not new:
+                result.configure(text="Paste your new token first.", fg="#c0392b")
+                token.focus_set()
+                return "break"
+            cfg2 = dict(cfg)
+            if cloud:
+                cfg2["email"] = email.get().strip()
+            if remember.get():
+                cfg2["token"] = protect_token(new)
+            else:
+                cfg2.pop("token", None)
+            save_jira_config(cfg2)
+            self._jira_token = new
+            result.configure(text="Checking with Jira\u2026", fg="#555")
+            client = JiraClient(cfg2["base_url"], cfg2.get("auth", "pat"), new,
+                                cfg2.get("email", ""), cfg2.get("ca_file", ""))
+
+            def ok(name):
+                self._close_prompt()
+                self._status(f"Jira credentials updated - connected as {name}.")
+                self.j_fetch_hint.configure(text="")  # (don't redraw: keeps a typed key)
+                if retry:
+                    retry()
+
+            def failed(msg, auth):
+                if result.winfo_exists():
+                    result.configure(text=msg, fg="#c0392b")
+
+            self._run_bg(client.myself, ok, "Checking the new Jira credentials\u2026",
+                         on_error=failed)
+            return "break"
+
+        token.bind("<Return>", save)
+        btns = tk.Frame(panel, bg=bg)
+        btns.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Button(btns, text="Save & retry" if retry else "Save", command=save).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self._close_prompt).pack(side="right", padx=4)
+        ttk.Button(btns, text="Connection settings\u2026", command=self._jira_settings).pack(side="left")
+        panel.columnconfigure(1, weight=1)
+        panel.place(relx=0.5, rely=0.08, anchor="n")
+        panel.lift()
+        (email if cloud and not email.get() else token).focus_set()
 
     def _jira_settings(self):
         """In-app panel for the optional Jira connection."""
@@ -2752,10 +2863,9 @@ class App(tk.Tk):
         email = row(4, "Email (Cloud)", ttk.Entry(panel, width=36))
         email.insert(0, cfg.get("email", ""))
         token = row(5, "Token", ttk.Entry(panel, width=36, show="\u2022"))
-        token.insert(0, self._jira_token)
-        if cfg.get("token") and not self._jira_token:
-            tk.Label(panel, text="(saved - leave blank to keep)", bg=bg,
-                     fg="#888", font=("", 8)).grid(row=6, column=1, sticky="w")
+        if cfg.get("token") or self._jira_token:
+            tk.Label(panel, text="(a token is set - leave blank to keep it, or paste a new one)",
+                     bg=bg, fg="#888", font=("", 8)).grid(row=6, column=1, columnspan=2, sticky="w")
         tk.Checkbutton(panel, text="Remember token on this computer" +
                        (" (encrypted with your Windows login)" if sys.platform == "win32"
                         else " (file readable only by you)"),
@@ -2797,7 +2907,9 @@ class App(tk.Tk):
                     result.configure(text=f"\u2713 Connected as {name}.", fg="#2d8738")
                 self._status(f"Jira connection works - connected as {name}.")
 
-            self._run_bg(client.myself, ok, "Testing the Jira connection\u2026")
+            self._run_bg(client.myself, ok, "Testing the Jira connection\u2026",
+                         on_error=lambda msg, auth: result.winfo_exists()
+                         and result.configure(text=msg, fg="#c0392b"))
 
         def save():
             new, tok = gather()
